@@ -8,8 +8,21 @@ dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.1",
     "pandas>=3.0.0",
-    "torch>=2.10.0",
-    "torchvision>=0.25.0",
+    "torch==2.5.1",
+    "torchvision==0.20.1",
     "tqdm>=4.67.1",
     "wandb>=0.24.0",
 ]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cuda", marker = "sys_platform != 'darwin'" },
+]
+torchvision = [
+    { index = "pytorch-cuda", marker = "sys_platform != 'darwin'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true

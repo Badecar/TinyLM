@@ -36,7 +36,7 @@ class MultiheadAttention(nn.Module):
 
 
 class OptimizedMultiHeadAttention(nn.Module):
-    def __init__(self, H:int, emb_dim:int, att_dim:int):
+    def __init__(self, H:int, emb_dim:int, att_dim:int, max_seq_len:int):
         super().__init__()
         self.att_dim = att_dim
         self.emb_dim = emb_dim
@@ -44,26 +44,32 @@ class OptimizedMultiHeadAttention(nn.Module):
         self.w_qkv = nn.Linear(emb_dim, 3 * att_dim * H, bias = False) # Since they are initialized the same anyway
         self.wo = nn.Linear(H * att_dim, emb_dim, bias=False)
 
+        # In __init__, for max_seq_len:
+        self.register_buffer("causal_mask", 
+            torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1) * float('-inf'))
+   
+
     def forward(self, x):
-        B, context_size, C = x.shape
+        B, T, C = x.shape
 
         qkv = self.w_qkv(x) # (B, context_size, 3*H*att_dim). Utilizes gpu better
         q, k, v = qkv.chunk(3, dim=-1) # 3 * (B, context_size, H*att_dim)
 
         # (B, context_size, H, att_dim) -> (B, H, context_size, att_dim)
-        q_heads = q.view(B, context_size, self.H, self.att_dim).transpose(1,2)
-        k_heads = k.view(B, context_size, self.H, self.att_dim).transpose(1,2)
-        v_heads = v.view(B, context_size, self.H, self.att_dim).transpose(1,2)
+        q_heads = q.view(B, T, self.H, self.att_dim).transpose(1,2)
+        k_heads = k.view(B, T, self.H, self.att_dim).transpose(1,2)
+        v_heads = v.view(B, T, self.H, self.att_dim).transpose(1,2)
 
         #manual
         qk = q_heads @ k_heads.transpose(-1, -2) / math.sqrt(self.att_dim) # (B, H, context_size, context_size)
-        ###masking?
+        qk = qk + self.causal_mask[:T, :T]
+
         attention = F.softmax(qk, dim=-1)
         y = attention @ v_heads # (B, H, context_size, att_dim)
 
         # wo computation needs: (context_size , h*att_dim) @ (h*att_dim , emb_dim) = (context_size , emb_dim)
         # batched
-        y_reshaped = y.transpose(1,2).view(B, context_size, self.H * self.att_dim)
+        y_reshaped = y.transpose(1,2).view(B, T, self.H * self.att_dim)
         mh_attention = self.wo(y_reshaped)
         return mh_attention
 

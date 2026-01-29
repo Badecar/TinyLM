@@ -6,9 +6,9 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-OUT_DIR = os.path.expanduser("~/slm_data")
-os.makedirs(OUT_DIR, exist_ok=True)
-OUT_FILE = os.path.join(OUT_DIR, "train.bin")
+OUT_DIR = os.path.expanduser(os.environ.get("TINYLM_DATA_DIR", "~/slm_data"))
+OUT_FILE = os.path.expanduser(os.environ.get("TINYLM_DATA_FILE", os.path.join(OUT_DIR, "train.bin")))
+os.makedirs(os.path.dirname(OUT_FILE), exist_ok=True)
 
 class TokenDataset(Dataset):
     """
@@ -60,7 +60,9 @@ def get_dataloader(
     batch_size: int,
     shuffle: bool = True,
     num_workers: int = 0,
-    pin_memory: bool = True
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = True,
 ) -> DataLoader:
     """
     Creates a PyTorch DataLoader for the tokenized dataset.
@@ -78,13 +80,19 @@ def get_dataloader(
     """
     dataset = TokenDataset(data_path, context_size)
     
+    loader_kwargs = {}
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+    
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=True  # Drop last incomplete batch
+        drop_last=True,  # Drop last incomplete batch
+        **loader_kwargs
     )
     
     return dataloader

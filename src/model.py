@@ -47,8 +47,10 @@ class OptimizedMultiHeadAttention(nn.Module):
         self.wo = nn.Linear(H * att_dim, emb_dim, bias=False)
 
         # Create causal mask: upper triangular matrix of 1s (True = mask out)
-        self.register_buffer("causal_mask", 
-            torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1))
+        self.register_buffer(
+            "causal_mask",
+            torch.triu(torch.ones(max_seq_len, max_seq_len, dtype=torch.bool), diagonal=1),
+        )
    
 
     def forward(self, x):
@@ -64,15 +66,11 @@ class OptimizedMultiHeadAttention(nn.Module):
 
         # Scaled dot-product attention with causal masking
         qk = q_heads @ k_heads.transpose(-1, -2) / math.sqrt(self.att_dim) # (B, H, T, T)
-        
         # Apply causal mask: mask out future positions
-        qk = qk.masked_fill(self.causal_mask[:T, :T].bool(), float('-inf'))
-
+        qk = qk.masked_fill(self.causal_mask[:T, :T], torch.finfo(qk.dtype).min)
         attention = F.softmax(qk, dim=-1)
         # Handle NaN from softmax (in case of numerical issues)
         # attention = torch.nan_to_num(attention, nan=0.0)
-
-        
         y = attention @ v_heads # (B, H, context_size, att_dim)
 
         # wo computation needs: (context_size , h*att_dim) @ (h*att_dim , emb_dim) = (context_size , emb_dim)
@@ -258,6 +256,7 @@ class Trainer:
         checkpoint_dir: str = 'checkpoints',
         verbose: bool = False,
         generation_interval: int = 100,
+        enable_tf32: bool = True,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -279,6 +278,12 @@ class Trainer:
             self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
         else:
             self.device = device
+        
+        if enable_tf32 and self.device == 'cuda':
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
         
         self.model = self.model.to(self.device)
         

@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import tiktoken
 
 class SelfAttention(nn.Module):
     def __init__(self, emb_dim:int, d_k:int, d_v:int):
@@ -45,9 +46,9 @@ class OptimizedMultiHeadAttention(nn.Module):
         self.w_qkv = nn.Linear(emb_dim, 3 * att_dim * H, bias = False) # Since they are initialized the same anyway
         self.wo = nn.Linear(H * att_dim, emb_dim, bias=False)
 
-        # In __init__, for max_seq_len:
+        # Create causal mask: upper triangular matrix of 1s (True = mask out)
         self.register_buffer("causal_mask", 
-            torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1) * float('-inf'))
+            torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1))
    
 
     def forward(self, x):
@@ -61,11 +62,16 @@ class OptimizedMultiHeadAttention(nn.Module):
         k_heads = k.view(B, T, self.H, self.att_dim).transpose(1,2)
         v_heads = v.view(B, T, self.H, self.att_dim).transpose(1,2)
 
-        #manual
-        qk = q_heads @ k_heads.transpose(-1, -2) / math.sqrt(self.att_dim) # (B, H, context_size, context_size)
-        qk = qk + self.causal_mask[:T, :T]
+        # Scaled dot-product attention with causal masking
+        qk = q_heads @ k_heads.transpose(-1, -2) / math.sqrt(self.att_dim) # (B, H, T, T)
+        
+        # Apply causal mask: mask out future positions
+        qk = qk.masked_fill(self.causal_mask[:T, :T].bool(), float('-inf'))
 
         attention = F.softmax(qk, dim=-1)
+        # Handle NaN from softmax (in case of numerical issues)
+        attention = torch.nan_to_num(attention, nan=0.0)
+        
         y = attention @ v_heads # (B, H, context_size, att_dim)
 
         # wo computation needs: (context_size , h*att_dim) @ (h*att_dim , emb_dim) = (context_size , emb_dim)
@@ -155,7 +161,11 @@ class TinyLM(nn.Module):
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # Standard initialization with scaling
+            std = 0.02
+            if hasattr(module, 'SCALE_INIT'):
+                std *= (2 * len(self.layers)) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -249,6 +259,8 @@ class Trainer:
         log_interval: int = 10,
         eval_interval: int = 500,
         checkpoint_dir: str = 'checkpoints',
+        verbose: bool = False,
+        generation_interval: int = 100,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -258,6 +270,8 @@ class Trainer:
         self.log_interval = log_interval
         self.eval_interval = eval_interval
         self.checkpoint_dir = checkpoint_dir
+        self.verbose = verbose
+        self.generation_interval = generation_interval
         
         # Device setup
         if device == 'auto':
@@ -275,6 +289,10 @@ class Trainer:
         
         # Learning rate scheduler with warmup
         self.lr_scheduler = self._get_lr_scheduler(learning_rate)
+        
+        # Tokenizer for text generation
+        if self.verbose:
+            self.tokenizer = tiktoken.get_encoding("gpt2")
         
         os.makedirs(checkpoint_dir, exist_ok=True)
     
@@ -309,6 +327,42 @@ class Trainer:
         
         return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
     
+    @torch.no_grad()
+    def generate_samples(self, step: int):
+        """Generate sample text to monitor training progress."""
+        if not self.verbose:
+            return
+        
+        self.model.eval()
+        
+        prompts = [
+            "The dog is",
+            "Once upon a time"
+        ]
+        
+        print(f"\n{'='*60}")
+        print(f"Generation samples at step {step}")
+        print('='*60)
+        
+        for prompt in prompts:
+            # Encode prompt
+            tokens = self.tokenizer.encode_ordinary(prompt)
+            idx = torch.tensor([tokens], dtype=torch.long, device=self.device)
+            
+            # Generate
+            generated = self.model.generate(idx, max_new_tokens=50, temperature=0.8)
+            
+            # Decode
+            generated_tokens = generated[0].tolist()
+            text = self.tokenizer.decode(generated_tokens)
+            
+            print(f"\nPrompt: \"{prompt}\"")
+            print(f"Output: {text}")
+        
+        print('='*60 + '\n')
+        
+        self.model.train()
+    
     def train(self):
         """Main training loop."""
         self.model.train()
@@ -335,13 +389,23 @@ class Trainer:
             logits = self.model(x)
             loss = self.loss_fn(logits, y)
             
+            # Check for NaN loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"\nWARNING: NaN/Inf loss detected at step {step + 1}")
+                print(f"Input range: [{x.min().item():.2f}, {x.max().item():.2f}]")
+                print(f"Logits range: [{logits.min().item():.2f}, {logits.max().item():.2f}]")
+                print("Skipping this batch...")
+                continue
+            
             # Backward pass
             self.optimizer.zero_grad()
             loss.backward()
             
-            # Gradient clipping
+            # Gradient clipping and monitoring
             if self.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            else:
+                grad_norm = 0.0
             
             self.optimizer.step()
             self.lr_scheduler.step()
@@ -352,8 +416,12 @@ class Trainer:
             if (step + 1) % self.log_interval == 0:
                 avg_loss = running_loss / self.log_interval
                 lr = self.optimizer.param_groups[0]['lr']
-                print(f"Step {step + 1}/{self.max_steps} | Loss: {avg_loss:.4f} | LR: {lr:.2e}")
+                print(f"Step {step + 1}/{self.max_steps} | Loss: {avg_loss:.4f} | LR: {lr:.2e} | Grad: {grad_norm:.2f}")
                 running_loss = 0.0
+            
+            # Generate sample text
+            if self.verbose and (step + 1) % self.generation_interval == 0:
+                self.generate_samples(step + 1)
             
             # Checkpointing
             if (step + 1) % self.eval_interval == 0:
@@ -417,8 +485,11 @@ if __name__ == "__main__":
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
-        learning_rate=3e-4,
+        learning_rate=1e-4,  # Lower learning rate for stability
+        warmup_steps=200,     # Longer warmup
         max_steps=10000,
+        verbose=True,         # Enable text generation during training
+        generation_interval=100,  # Generate samples every 100 steps
     )
     
     trainer.train()

@@ -70,7 +70,7 @@ class OptimizedMultiHeadAttention(nn.Module):
 
         # wo computation needs: (context_size , h*att_dim) @ (h*att_dim , emb_dim) = (context_size , emb_dim)
         # batched
-        y_reshaped = y.transpose(1,2).view(B, T, self.H * self.att_dim)
+        y_reshaped = y.transpose(1,2).contiguous().view(B, T, self.H * self.att_dim)
         mh_attention = self.wo(y_reshaped)
         return mh_attention
 

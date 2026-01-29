@@ -70,7 +70,8 @@ class OptimizedMultiHeadAttention(nn.Module):
 
         attention = F.softmax(qk, dim=-1)
         # Handle NaN from softmax (in case of numerical issues)
-        attention = torch.nan_to_num(attention, nan=0.0)
+        # attention = torch.nan_to_num(attention, nan=0.0)
+
         
         y = attention @ v_heads # (B, H, context_size, att_dim)
 
@@ -94,20 +95,16 @@ class RMSNorm(nn.Module):
         return self.weight * self._norm(x.float()).type_as(x)
     
 class FeedForward(nn.Module):
-    def __init__(self, emb_dim:int):
+    def __init__(self, emb_dim: int):
         super().__init__()
-        self.emb_dim = emb_dim
-        self.ff = nn.Sequential(
-            nn.Linear(emb_dim, emb_dim*4, bias=False), # why no bias??
-            nn.SiLU(),
-            nn.Linear(emb_dim*4, emb_dim*4, bias=False),
-            nn.SiLU(),
-            nn.Linear(emb_dim*4, emb_dim, bias=False),
-            nn.SiLU()
-        )
-    
+        hidden_dim = int(2 * (4 * emb_dim) / 3) # Standard Llama scaling
+        self.w1 = nn.Linear(emb_dim, hidden_dim, bias=False) # Gate
+        self.w2 = nn.Linear(hidden_dim, emb_dim, bias=False) # Down
+        self.w3 = nn.Linear(emb_dim, hidden_dim, bias=False) # Up
+
     def forward(self, x):
-        return self.ff(x)
+        # The 'Gate' (w1) is activated by SiLU and multiplied by the 'Up' (w3)
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 class Decoder(nn.Module):
     def __init__(self, H:int, emb_dim:int, att_dim:int, max_seq_len:int):
@@ -272,6 +269,10 @@ class Trainer:
         self.checkpoint_dir = checkpoint_dir
         self.verbose = verbose
         self.generation_interval = generation_interval
+
+        if hasattr(torch, 'compile') and self.device == 'cuda':
+            print("Compiling model for speed...")
+            self.model = torch.compile(self.model)
         
         # Device setup
         if device == 'auto':
@@ -386,8 +387,10 @@ class Trainer:
             x, y = x.to(self.device), y.to(self.device)
             
             # Forward pass
-            logits = self.model(x)
-            loss = self.loss_fn(logits, y)
+            # Use autocast for the forward pass
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits = self.model(x)
+                loss = self.loss_fn(logits, y)
             
             # Check for NaN loss
             if torch.isnan(loss) or torch.isinf(loss):
@@ -457,15 +460,25 @@ if __name__ == "__main__":
     from data import get_dataloader, OUT_FILE
     
     # Configuration
-    CONTEXT_SIZE = 256
+    CONTEXT_SIZE = 512
     BATCH_SIZE = 32
     
     # Create model
+    # FOR SMALLER GPU
+    # model = TinyLM(
+    #     vocab_size=50257,
+    #     emb_dim=512,
+    #     n_layers=6,
+    #     n_heads=8,
+    #     att_dim=64,
+    #     max_seq_len=CONTEXT_SIZE,
+    # )
+
     model = TinyLM(
         vocab_size=50257,
-        emb_dim=512,
-        n_layers=6,
-        n_heads=8,
+        emb_dim=768,
+        n_layers=12,
+        n_heads=12,
         att_dim=64,
         max_seq_len=CONTEXT_SIZE,
     )

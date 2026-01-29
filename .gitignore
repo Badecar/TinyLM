@@ -17,3 +17,6 @@ logs/
 
 # Checkpoints
 checkpoints/
+
+#Wandb
+wandb/

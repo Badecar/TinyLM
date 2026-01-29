@@ -9,13 +9,17 @@
 #BSUB -n 4
 #BSUB -R "rusage[mem=16GB]"   # Increased for staging overhead
 #BSUB -R "span[hosts=1]"
-#BSUB -W 10:00
+#BSUB -W 18:00
 #BSUB -B
 #BSUB -N
 
 # 1. Environment Setup
 mkdir -p logs
 export PATH="$HOME/.local/bin:$PATH"
+# Yes, this is the wandb API key. Yes, it is freely visible here on github. No, I am not worried about it.
+export WANDB_API_KEY="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"
+export WANDB_ENTITY="badecar-danmarks-tekniske-universitet-dtu"
+export WANDB_PROJECT="TinyLM"
 
 # Load essential modules for GPU training
 module load cuda/12.1
@@ -38,7 +42,7 @@ uv sync
 # 4. Run the Training Burn
 # We pass the LOCAL_DATA path to your script
 echo "Starting training at: $(date)"
-uv run src/main.py --data_path "$NODE_DATA/train.bin" --batch_size 64
+uv run src/model.py --data_path "$NODE_DATA/train.bin" --batch_size 64
 
 # 5. Cleanup
 # Removing the data from the local node to keep the cluster healthy

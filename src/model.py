@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tiktoken
+import wandb
 
 class SelfAttention(nn.Module):
     def __init__(self, emb_dim:int, d_k:int, d_v:int):
@@ -257,6 +258,9 @@ class Trainer:
         verbose: bool = False,
         generation_interval: int = 100,
         enable_tf32: bool = True,
+        use_wandb: bool = True,
+        wandb_project: str | None = None,
+        wandb_entity: str | None = None,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -268,6 +272,7 @@ class Trainer:
         self.checkpoint_dir = checkpoint_dir
         self.verbose = verbose
         self.generation_interval = generation_interval
+        self.use_wandb = use_wandb
         
         # Device setup (must be before torch.compile)
         if device == 'auto':
@@ -303,10 +308,36 @@ class Trainer:
         self.lr_scheduler = self._get_lr_scheduler(learning_rate)
         
         # Tokenizer for text generation
-        if self.verbose:
+        self.enable_generation = self.verbose or self.use_wandb
+        if self.enable_generation:
             self.tokenizer = tiktoken.get_encoding("gpt2")
         
         os.makedirs(checkpoint_dir, exist_ok=True)
+
+        if self.use_wandb:
+            project = wandb_project or os.getenv("WANDB_PROJECT", "TinyLM")
+            entity = wandb_entity or os.getenv("WANDB_ENTITY", "badecar-danmarks-tekniske-universitet-dtu")
+            self.wandb_run = wandb.init(
+                project=project,
+                entity=entity,
+                config={
+                    "learning_rate": learning_rate,
+                    "weight_decay": weight_decay,
+                    "betas": betas,
+                    "grad_clip": grad_clip,
+                    "warmup_steps": warmup_steps,
+                    "max_steps": max_steps,
+                    "log_interval": log_interval,
+                    "eval_interval": eval_interval,
+                    "generation_interval": generation_interval,
+                    "batch_size": getattr(train_loader, "batch_size", None),
+                    "device": self.device,
+                },
+                settings=wandb.Settings(console="wrap"),
+            )
+            wandb.watch(self.model, log="gradients", log_freq=self.log_interval)
+        else:
+            self.wandb_run = None
     
     def _configure_optimizer(self, lr, weight_decay, betas):
         """Configure optimizer with weight decay only on certain parameters."""
@@ -342,7 +373,7 @@ class Trainer:
     @torch.no_grad()
     def generate_samples(self, step: int):
         """Generate sample text to monitor training progress."""
-        if not self.verbose:
+        if not self.enable_generation:
             return
         
         self.model.eval()
@@ -356,6 +387,7 @@ class Trainer:
         print(f"Generation samples at step {step}")
         print('='*60)
         
+        samples = []
         for prompt in prompts:
             # Encode prompt
             tokens = self.tokenizer.encode_ordinary(prompt)
@@ -367,12 +399,19 @@ class Trainer:
             # Decode
             generated_tokens = generated[0].tolist()
             text = self.tokenizer.decode(generated_tokens)
+            samples.append({"step": step, "prompt": prompt, "output": text})
             
             print(f"\nPrompt: \"{prompt}\"")
             print(f"Output: {text}")
         
         print('='*60 + '\n')
         
+        if self.wandb_run is not None:
+            table = wandb.Table(columns=["step", "prompt", "output"])
+            for row in samples:
+                table.add_data(row["step"], row["prompt"], row["output"])
+            wandb.log({"samples": table}, step=step)
+
         self.model.train()
     
     def train(self):
@@ -431,10 +470,19 @@ class Trainer:
                 avg_loss = running_loss / self.log_interval
                 lr = self.optimizer.param_groups[0]['lr']
                 print(f"Step {step + 1}/{self.max_steps} | Loss: {avg_loss:.4f} | LR: {lr:.2e} | Grad: {grad_norm:.2f}")
+                if self.wandb_run is not None:
+                    wandb.log(
+                        {
+                            "train/loss": avg_loss,
+                            "train/lr": lr,
+                            "train/grad_norm": grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
+                        },
+                        step=step + 1,
+                    )
                 running_loss = 0.0
             
             # Generate sample text
-            if self.verbose and (step + 1) % self.generation_interval == 0:
+            if self.enable_generation and (step + 1) % self.generation_interval == 0:
                 self.generate_samples(step + 1)
             
             # Checkpointing
@@ -446,6 +494,8 @@ class Trainer:
                 self.save_checkpoint(step + 1, 'latest.pt')
         
         print("Training complete!")
+        if self.wandb_run is not None:
+            self.wandb_run.finish()
         return self.model
     
     def save_checkpoint(self, step: int, filename: str):
@@ -466,71 +516,12 @@ class Trainer:
         self.lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         return checkpoint['step']
 
-
-# if __name__ == "__main__":
-#     from data import get_dataloader, OUT_FILE
-    
-#     # # Configuration
-#     # CONTEXT_SIZE = 256 #256 for low ram, otherwise 512
-#     # BATCH_SIZE = 32
-
-#     # Updated for 125M parameters on A100 80GB
-#     CONTEXT_SIZE = 512    # Increase from 256 for better coherence
-#     BATCH_SIZE = 64      # A100 can easily handle this with bfloat16
-#     EMB_DIM = 768        # Standard for 125M models
-#     N_LAYERS = 12        # Deeper stack for better reasoning
-#     N_HEADS = 12         # 768 / 12 = 64 head_dim
-    
-#     # Create model
-#     # FOR SMALLER GPU
-#     model = TinyLM(
-#         vocab_size=50257,
-#         emb_dim=512,
-#         n_layers=6,
-#         n_heads=8,
-#         att_dim=64,
-#         max_seq_len=CONTEXT_SIZE,
-#     )
-
-#     # model = TinyLM(
-#     #     vocab_size=50257,
-#     #     emb_dim=768,
-#     #     n_layers=12,
-#     #     n_heads=12,
-#     #     att_dim=64,
-#     #     max_seq_len=CONTEXT_SIZE,
-#     # )
-    
-#     # Create dataloader using data.py
-#     train_loader = get_dataloader(
-#         data_path=OUT_FILE,
-#         context_size=CONTEXT_SIZE,
-#         batch_size=BATCH_SIZE,
-#         shuffle=True,
-#         num_workers=0,
-#         pin_memory=True,
-#     )
-#     print(f"DataLoader ready! Total batches: {len(train_loader):,}")
-    
-#     # Create trainer and train
-#     trainer = Trainer(
-#         model=model,
-#         train_loader=train_loader,
-#         learning_rate=1e-4,  # Lower learning rate for stability
-#         warmup_steps=200,     # Longer warmup
-#         max_steps=10000,
-#         verbose=True,         # Enable text generation during training
-#         generation_interval=100,  # Generate samples every 100 steps
-#     )
-    
-#     trainer.train()
-
 if __name__ == "__main__":
     from data import get_dataloader, OUT_FILE
     
     # --- HPC Optimized Config ---
     CONTEXT_SIZE = 512
-    BATCH_SIZE = 64 
+    BATCH_SIZE = 64
     LEARNING_RATE = 6e-4
     MAX_STEPS = 80000 
     

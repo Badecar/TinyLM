@@ -268,16 +268,22 @@ class Trainer:
         self.checkpoint_dir = checkpoint_dir
         self.verbose = verbose
         self.generation_interval = generation_interval
-
-        if hasattr(torch, 'compile') and self.device == 'cuda':
-            print("Compiling model for speed...")
-            self.model = torch.compile(self.model)
         
-        # Device setup
+        # Device setup (must be before torch.compile)
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
         else:
             self.device = device
+
+        # Try to compile model for speed (requires Triton on CUDA)
+        # if hasattr(torch, 'compile') and self.device == 'cuda':
+        #     try:
+        #         print("Compiling model with torch.compile...")
+        #         self.model = torch.compile(self.model)
+        #         print("Model compiled successfully!")
+        #     except Exception as e:
+        #         print(f"Warning: torch.compile failed ({e.__class__.__name__}), falling back to eager mode.")
+        #         print("This is fine - training will work but may be slightly slower.")
         
         if enable_tf32 and self.device == 'cuda':
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -461,24 +467,73 @@ class Trainer:
         return checkpoint['step']
 
 
+# if __name__ == "__main__":
+#     from data import get_dataloader, OUT_FILE
+    
+#     # # Configuration
+#     # CONTEXT_SIZE = 256 #256 for low ram, otherwise 512
+#     # BATCH_SIZE = 32
+
+#     # Updated for 125M parameters on A100 80GB
+#     CONTEXT_SIZE = 512    # Increase from 256 for better coherence
+#     BATCH_SIZE = 64      # A100 can easily handle this with bfloat16
+#     EMB_DIM = 768        # Standard for 125M models
+#     N_LAYERS = 12        # Deeper stack for better reasoning
+#     N_HEADS = 12         # 768 / 12 = 64 head_dim
+    
+#     # Create model
+#     # FOR SMALLER GPU
+#     model = TinyLM(
+#         vocab_size=50257,
+#         emb_dim=512,
+#         n_layers=6,
+#         n_heads=8,
+#         att_dim=64,
+#         max_seq_len=CONTEXT_SIZE,
+#     )
+
+#     # model = TinyLM(
+#     #     vocab_size=50257,
+#     #     emb_dim=768,
+#     #     n_layers=12,
+#     #     n_heads=12,
+#     #     att_dim=64,
+#     #     max_seq_len=CONTEXT_SIZE,
+#     # )
+    
+#     # Create dataloader using data.py
+#     train_loader = get_dataloader(
+#         data_path=OUT_FILE,
+#         context_size=CONTEXT_SIZE,
+#         batch_size=BATCH_SIZE,
+#         shuffle=True,
+#         num_workers=0,
+#         pin_memory=True,
+#     )
+#     print(f"DataLoader ready! Total batches: {len(train_loader):,}")
+    
+#     # Create trainer and train
+#     trainer = Trainer(
+#         model=model,
+#         train_loader=train_loader,
+#         learning_rate=1e-4,  # Lower learning rate for stability
+#         warmup_steps=200,     # Longer warmup
+#         max_steps=10000,
+#         verbose=True,         # Enable text generation during training
+#         generation_interval=100,  # Generate samples every 100 steps
+#     )
+    
+#     trainer.train()
+
 if __name__ == "__main__":
     from data import get_dataloader, OUT_FILE
     
-    # Configuration
+    # --- HPC Optimized Config ---
     CONTEXT_SIZE = 512
-    BATCH_SIZE = 32
+    BATCH_SIZE = 64 
+    LEARNING_RATE = 6e-4
+    MAX_STEPS = 80000 
     
-    # Create model
-    # FOR SMALLER GPU
-    # model = TinyLM(
-    #     vocab_size=50257,
-    #     emb_dim=512,
-    #     n_layers=6,
-    #     n_heads=8,
-    #     att_dim=64,
-    #     max_seq_len=CONTEXT_SIZE,
-    # )
-
     model = TinyLM(
         vocab_size=50257,
         emb_dim=768,
@@ -488,26 +543,25 @@ if __name__ == "__main__":
         max_seq_len=CONTEXT_SIZE,
     )
     
-    # Create dataloader using data.py
     train_loader = get_dataloader(
         data_path=OUT_FILE,
         context_size=CONTEXT_SIZE,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=0,
+        num_workers=4,        # Use 4 workers to feed the A100 fast enough
         pin_memory=True,
     )
-    print(f"DataLoader ready! Total batches: {len(train_loader):,}")
     
-    # Create trainer and train
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
-        learning_rate=1e-4,  # Lower learning rate for stability
-        warmup_steps=200,     # Longer warmup
-        max_steps=10000,
-        verbose=True,         # Enable text generation during training
-        generation_interval=100,  # Generate samples every 100 steps
+        learning_rate=LEARNING_RATE,
+        weight_decay=0.1,
+        warmup_steps=2000,
+        max_steps=MAX_STEPS,
+        checkpoint_dir='~/checkpoints', # Ensure this points to your HOME
+        verbose=True,
+        generation_interval=500, # Generate less often to keep the GPU focused on training
     )
     
     trainer.train()

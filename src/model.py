@@ -97,10 +97,10 @@ class FeedForward(nn.Module):
         return self.ff(x)
 
 class Decoder(nn.Module):
-    def __init__(self, H=12, emb_dim=512, d_k=64, d_v=512):
+    def __init__(self, H=12, emb_dim=512, att_dim=64):
         super().__init__()
         self.rms_norm = RMSNorm(emb_dim=emb_dim)
-        self.mh_attention = MultiheadAttention(H=H, emb_dim=emb_dim, d_k=d_k, d_v=d_v)
+        self.mh_attention = OptimizedMultiHeadAttention(H=H, emb_dim=emb_dim, att_dim=att_dim)
         self.ff = FeedForward(emb_dim=emb_dim)
     
     def forward(self, x):

@@ -17,7 +17,7 @@ class SelfAttention(nn.Module):
         K = self.wk(x)
         V = self.wv(x)
 
-        attention = nn.Softmax(Q @ K.T / torch.Tensor(self.d_k).sqrt()) @ V
+        attention = F.softmax(Q @ K.T / torch.Tensor(self.d_k).sqrt(), dim=1) @ V
         return attention
 
 
@@ -31,6 +31,37 @@ class MultiheadAttention(nn.Module):
         attention_heads = torch.cat(heads_output)
         scaled_attention = self.wo(attention_heads)
         return scaled_attention
+
+
+class OptimizedMultiHeadAttention(nn.Module):
+    def __init__(self, H:int, emb_dim:int, att_dim:int):
+        self.att_dim = att_dim
+        self.emb_dim = emb_dim
+        self.H = H
+        self.w_qkv = nn.Linear(emb_dim, 3 * att_dim * H, bias = False) # Since they are initialized the same anyway
+        self.wo = nn.Linear(att_dim * H, emb_dim, bias=False)
+
+    def forward(self, x):
+        B, context_size, C = x.shape()
+
+        qkv = self.w_qkv(x) # (B, context_size, 3*att_dim*H). Utilizes gpu better
+        q, k, v = qkv.chunk(3, dim=-1) # 3 * (B, context_size, att_dim*H)
+        
+        # (B, context_size, H, att_dim) -> (B, H, context_size, att_dim)
+        q_heads = q.view(B, context_size, self.H, self.att_dim).transpose(1,2)
+        k_heads = k.view(B, context_size, self.H, self.att_dim).transpose(1,2)
+        v_heads = v.view(B, context_size, self.H, self.att_dim).transpose(1,2)
+
+        #manual
+        qk = q_heads @ k_heads.transpose(-1, -2) / torch.Tensor(self.att_dim).sqrt() # (B, context_size, emb_dim, emb_dim)
+        ###masking?
+        attention = F.softmax(qk, dim=-1) @ v_heads # (B, context_size, emb_dim, att_dim)
+
+
+        
+
+        #fast
+
 
 
 class RMSNorm(nn.Module):

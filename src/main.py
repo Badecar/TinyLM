@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class SelfAttention:
-    def __init__(self, emb_dim=512, d_k=768, d_v=64):
+class SelfAttention(nn.Module):
+    def __init__(self, emb_dim:int, d_k:int, d_v:int):
         self.d_k = d_k
         self.d_v = d_v
 
@@ -21,10 +21,10 @@ class SelfAttention:
         return attention
 
 
-class MultiheadAttention:
-    def __init__(self, H=12, emb_dim=512, d_v=512):
-        self.heads = [SelfAttention() for _ in range(H)]
-        self.wo = nn.Linear(d_v*H, emb_dim)
+class MultiheadAttention(nn.Module):
+    def __init__(self, H:int, emb_dim:int, d_k:int, d_v:int):
+        self.heads = [SelfAttention(emb_dim=emb_dim, d_k=d_k, d_v=d_v) for _ in range(H)]
+        self.wo = nn.Linear(d_v*H, emb_dim, bias=False)
     
     def forward(self, x):
         heads_output = [head(x) for head in self.heads]
@@ -34,22 +34,42 @@ class MultiheadAttention:
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, emb_dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         # This is 'g_i' from your image
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.weight = nn.Parameter(torch.ones(emb_dim))
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         return self.weight * self._norm(x.float()).type_as(x)
-
+    
+class FeedForward(nn.Module):
+    def __init__(self, emb_dim:int):
+        self.emb_dim = emb_dim
+        self.ff = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim*4, bias=False), # why no bias??
+            nn.SiLU(),
+            nn.Linear(emb_dim*4, emb_dim*4, bias=False),
+            nn.SiLU(),
+            nn.Linear(emb_dim*4, emb_dim, bias=False),
+            nn.SiLU()
+        )
+    
+    def forward(self, x):
+        return self.ff(x)
 
 class Decoder:
-    def __init__(self, ):
+    def __init__(self, H=12, emb_dim=512, d_k=64, d_v=512):
+        self.rms_norm = RMSNorm(emb_dim=emb_dim)
+        self.mh_attention = MultiheadAttention(H=H, emb_dim=emb_dim, d_k=d_k, d_v=d_v)
+        self.ff = FeedForward(emb_dim=emb_dim)
+    
+    def forward(self, x):
         
+    
 
 
 # if __name__ == "__main__":

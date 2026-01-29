@@ -23,7 +23,7 @@ module load cuda/12.1
 # 2. Data Staging (The "HPC Pro" Workaround)
 # We move the data from your Home directory to the Local SSD of the GPU node.
 # This ensures the GPU never waits for the network.
-NODE_DATA="/tmp/$USER_tinylm_data"
+NODE_DATA="/tmp/${USER}_tinylm_data"
 mkdir -p "$NODE_DATA"
 
 echo "Staging data: Home -> Local SSD ($NODE_DATA)..."

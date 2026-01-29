@@ -67,7 +67,6 @@ class OptimizedMultiHeadAttention(nn.Module):
         mh_attention = self.wo(y_reshaped)
         return mh_attention
 
-
 class RMSNorm(nn.Module):
     def __init__(self, emb_dim: int, eps: float = 1e-6):
         super().__init__()
@@ -83,6 +82,7 @@ class RMSNorm(nn.Module):
     
 class FeedForward(nn.Module):
     def __init__(self, emb_dim:int):
+        super().__init__()
         self.emb_dim = emb_dim
         self.ff = nn.Sequential(
             nn.Linear(emb_dim, emb_dim*4, bias=False), # why no bias??
@@ -96,8 +96,9 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.ff(x)
 
-class Decoder:
+class Decoder(nn.Module):
     def __init__(self, H=12, emb_dim=512, d_k=64, d_v=512):
+        super().__init__()
         self.rms_norm = RMSNorm(emb_dim=emb_dim)
         self.mh_attention = MultiheadAttention(H=H, emb_dim=emb_dim, d_k=d_k, d_v=d_v)
         self.ff = FeedForward(emb_dim=emb_dim)

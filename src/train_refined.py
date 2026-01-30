@@ -379,7 +379,7 @@ class Trainer:
 def main():
     # --- HPC Optimized Config ---
     CONTEXT_SIZE = 1024
-    BATCH_SIZE = 128
+    BATCH_SIZE = 64
     LEARNING_RATE = 6e-4
     MAX_STEPS = 80000
     USE_ACTIVATION_CHECKPOINTING = True

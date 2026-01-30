@@ -121,19 +121,22 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.prepare:
-        os.makedirs(os.path.expanduser("~/slm_data"), exist_ok=True)
+        # Use repo root for data directory (where existing data is located)
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        data_dir = os.path.join(repo_root, "slm_data")
+        os.makedirs(data_dir, exist_ok=True)
         
         datasets_to_prepare = [
-            ("HuggingFaceFW/fineweb-edu", "sample-10BT", "train", "~/slm_data/fineweb.bin"),
-            ("bigcode/the-stack-dedup", "python", "train", "~/slm_data/python.bin"),
+            ("HuggingFaceFW/fineweb-edu", "sample-10BT", "train", os.path.join(data_dir, "fineweb.bin")),
+            ("bigcode/the-stack-dedup", "python", "train", os.path.join(data_dir, "python.bin")),
             # Changed 'default' to 'web_samples_v2' to fix the ValueError
-            ("HuggingFaceTB/cosmopedia", "web_samples_v2", "train", "~/slm_data/cosmo.bin")
+            ("HuggingFaceTB/cosmopedia", "web_samples_v2", "train", os.path.join(data_dir, "cosmo.bin"))
         ]
         
         for name, subset, split, out_path in datasets_to_prepare:
-            # Added a simple check to skip if the file already exists (saves time)
-            full_out_path = os.path.expanduser(out_path)
-            if os.path.exists(full_out_path):
-                print(f"Skipping {name} - already exists at {out_path}")
+            # Check if file already exists (saves time on re-runs)
+            if os.path.exists(out_path):
+                size_gb = os.path.getsize(out_path) / 1e9
+                print(f"Skipping {name} - already exists at {out_path} ({size_gb:.2f}GB)")
                 continue
-            tokenize_ingredient(name, subset, split, full_out_path)
+            tokenize_ingredient(name, subset, split, out_path)

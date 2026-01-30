@@ -261,6 +261,9 @@ class Trainer:
         use_wandb: bool = True,
         wandb_project: str | None = None,
         wandb_entity: str | None = None,
+        best_wandb_interval: int = 2500,
+        resume_from: str | None = None,
+        resume_latest: bool = False,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -269,10 +272,12 @@ class Trainer:
         self.max_steps = max_steps
         self.log_interval = log_interval
         self.eval_interval = eval_interval
-        self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_dir = os.path.expanduser(checkpoint_dir)
         self.verbose = verbose
         self.generation_interval = generation_interval
         self.use_wandb = use_wandb
+        self.best_wandb_interval = best_wandb_interval
+        self.start_step = 0
         
         # Device setup (must be before torch.compile)
         if device == 'auto':
@@ -312,7 +317,7 @@ class Trainer:
         if self.enable_generation:
             self.tokenizer = tiktoken.get_encoding("gpt2")
         
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         if self.use_wandb:
             project = wandb_project or os.getenv("WANDB_PROJECT", "TinyLM")
@@ -330,6 +335,7 @@ class Trainer:
                     "log_interval": log_interval,
                     "eval_interval": eval_interval,
                     "generation_interval": generation_interval,
+                    "best_wandb_interval": best_wandb_interval,
                     "batch_size": getattr(train_loader, "batch_size", None),
                     "device": self.device,
                 },
@@ -338,6 +344,22 @@ class Trainer:
             wandb.watch(self.model, log="gradients", log_freq=self.log_interval)
         else:
             self.wandb_run = None
+
+        if resume_latest or resume_from:
+            checkpoint_path = os.path.expanduser(resume_from) if resume_from else None
+            if resume_latest:
+                checkpoint_path = self._get_latest_checkpoint()
+            if checkpoint_path and os.path.exists(checkpoint_path):
+                self.start_step = self.load_checkpoint(checkpoint_path)
+                print(f"Resumed from checkpoint: {checkpoint_path} (step {self.start_step})")
+            else:
+                print("Warning: checkpoint not found; starting from scratch.")
+
+            if self.start_step >= self.max_steps:
+                print(
+                    f"Warning: start_step ({self.start_step}) >= max_steps ({self.max_steps}). "
+                    "No training will run unless you increase max_steps."
+                )
     
     def _configure_optimizer(self, lr, weight_decay, betas):
         """Configure optimizer with weight decay only on certain parameters."""
@@ -369,6 +391,21 @@ class Trainer:
             return 0.5 * (1 + math.cos(math.pi * progress))
         
         return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+
+    def _get_latest_checkpoint(self) -> str | None:
+        latest_path = os.path.join(self.checkpoint_dir, "latest.pt")
+        if os.path.exists(latest_path):
+            return latest_path
+        if not os.path.isdir(self.checkpoint_dir):
+            return None
+        candidates = [
+            os.path.join(self.checkpoint_dir, f)
+            for f in os.listdir(self.checkpoint_dir)
+            if f.endswith(".pt")
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=os.path.getmtime)
     
     @torch.no_grad()
     def generate_samples(self, step: int):
@@ -426,7 +463,7 @@ class Trainer:
         print(f"Total parameters: {sum(p.numel() for p in self.model.parameters()):,}")
         print(f"Trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
         
-        for step in range(self.max_steps):
+        for step in range(self.start_step, self.max_steps):
             # Get batch (with cycling)
             try:
                 x, y = next(data_iter)
@@ -471,11 +508,12 @@ class Trainer:
                 lr = self.optimizer.param_groups[0]['lr']
                 print(f"Step {step + 1}/{self.max_steps} | Loss: {avg_loss:.4f} | LR: {lr:.2e} | Grad: {grad_norm:.2f}")
                 if self.wandb_run is not None:
+                    grad_norm_value = grad_norm if isinstance(grad_norm, float) else float(grad_norm)
                     wandb.log(
                         {
                             "train/loss": avg_loss,
                             "train/lr": lr,
-                            "train/grad_norm": grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
+                            "train/grad_norm": grad_norm_value,
                         },
                         step=step + 1,
                     )
@@ -491,6 +529,18 @@ class Trainer:
                 if avg_loss < best_loss:
                     best_loss = avg_loss
                     self.save_checkpoint(step + 1, 'best.pt')
+                    if self.wandb_run is not None and (
+                        (step + 1) == 1 or (step + 1) % self.best_wandb_interval == 0
+                    ):
+                        best_path = os.path.join(self.checkpoint_dir, "best.pt")
+                        artifact = wandb.Artifact(
+                            name=f"best-pt-step-{step + 1}",
+                            type="checkpoint",
+                            metadata={"step": step + 1, "loss": avg_loss},
+                        )
+                        artifact.add_file(best_path)
+                        self.wandb_run.log_artifact(artifact)
+                        wandb.log({"best/step": step + 1, "best/loss": avg_loss}, step=step + 1)
                 self.save_checkpoint(step + 1, 'latest.pt')
         
         print("Training complete!")
@@ -518,6 +568,7 @@ class Trainer:
 
 if __name__ == "__main__":
     from data import get_dataloader, OUT_FILE
+    import argparse
     
     # --- HPC Optimized Config ---
     CONTEXT_SIZE = 512
@@ -525,19 +576,30 @@ if __name__ == "__main__":
     LEARNING_RATE = 6e-4
     MAX_STEPS = 80000 
     
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", type=str, default=OUT_FILE)
+    parser.add_argument("--context_size", type=int, default=CONTEXT_SIZE)
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--learning_rate", type=float, default=LEARNING_RATE)
+    parser.add_argument("--max_steps", type=int, default=MAX_STEPS)
+    parser.add_argument("--checkpoint_dir", type=str, default="~/checkpoints")
+    parser.add_argument("--resume_latest", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a checkpoint file")
+    args = parser.parse_args()
+    
     model = TinyLM(
         vocab_size=50257,
         emb_dim=768,
         n_layers=12,
         n_heads=12,
         att_dim=64,
-        max_seq_len=CONTEXT_SIZE,
+        max_seq_len=args.context_size,
     )
     
     train_loader = get_dataloader(
-        data_path=OUT_FILE,
-        context_size=CONTEXT_SIZE,
-        batch_size=BATCH_SIZE,
+        data_path=args.data_path,
+        context_size=args.context_size,
+        batch_size=args.batch_size,
         shuffle=True,
         num_workers=4,        # Use 4 workers to feed the A100 fast enough
         pin_memory=True,
@@ -546,13 +608,15 @@ if __name__ == "__main__":
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
-        learning_rate=LEARNING_RATE,
+        learning_rate=args.learning_rate,
         weight_decay=0.1,
         warmup_steps=2000,
-        max_steps=MAX_STEPS,
-        checkpoint_dir='~/checkpoints', # Ensure this points to your HOME
+        max_steps=args.max_steps,
+        checkpoint_dir=args.checkpoint_dir, # Ensure this points to your HOME
         verbose=True,
         generation_interval=500, # Generate less often to keep the GPU focused on training
+        resume_latest=args.resume_latest,
+        resume_from=args.resume_from,
     )
     
     trainer.train()

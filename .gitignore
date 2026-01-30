@@ -20,3 +20,6 @@ checkpoints/
 
 #Wandb
 wandb/
+
+#Data
+slm_data/

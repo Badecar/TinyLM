@@ -6,10 +6,15 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "datasets>=4.5.0",
+    "fastapi>=0.115.6",
+    "gradio>=5.13.1",
     "huggingface>=0.0.1",
     "matplotlib>=3.10.8",
+    "modal>=0.73.80",
     "numpy>=2.4.1",
     "pandas>=3.0.0",
+    "pydantic>=2.10.4",
+    "requests>=2.32.3",
     "tiktoken>=0.12.0",
     "torch==2.5.1",
     "torchvision==0.20.1",

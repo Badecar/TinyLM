@@ -11,7 +11,7 @@ from tqdm import tqdm
 DATA_SOURCES = {
     "knowledge": "HuggingFaceFW/fineweb-edu", # sample-10BT subset
     "logic": "bigcode/the-stack-dedup",       # python subset
-    "voice": "HuggingFaceFW/cosmo-corpus"     # cosmopedia synthetic data
+    "voice": "HuggingFaceTB/cosmopedia"     # cosmopedia synthetic data
 }
 
 class EliteDataLoader:
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.prepare:
-        os.makedirs("~/slm_data", exist_ok=True)
+        os.makedirs(os.path.expanduser("~/slm_data"), exist_ok=True)
         # Tokenize the Elite Mixture (Targeting 2B tokens each for safety)
         datasets_to_prepare = [
             ("HuggingFaceFW/fineweb-edu", "sample-10BT", "train", "~/slm_data/fineweb.bin"),
@@ -127,4 +127,8 @@ if __name__ == "__main__":
         ]
         
         for name, subset, split, out_path in tqdm(datasets_to_prepare, desc="Preparing datasets"):
+            expanded_path = os.path.expanduser(out_path)
+            if os.path.exists(expanded_path):
+                print(f"Skipping {out_path} - already exists")
+                continue
             tokenize_ingredient(name, subset, split, out_path)

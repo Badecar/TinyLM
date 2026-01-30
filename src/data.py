@@ -123,39 +123,6 @@ class EliteDataLoader:
         return torch.stack(batch_x), torch.stack(batch_y)
 
 
-class EliteIterableDataset(torch.utils.data.IterableDataset):
-    """Iterable dataset that yields pre-batched samples from EliteDataLoader."""
-
-    def __init__(self, data_dir, batch_size, context_size, weights=None):
-        super().__init__()
-        self.data_dir = data_dir
-        self.batch_size = batch_size
-        self.context_size = context_size
-        self.weights = weights
-
-    def _build_loader(self):
-        return EliteDataLoader(
-            data_dir=self.data_dir,
-            B=self.batch_size,
-            L=self.context_size,
-            weights=self.weights,
-        )
-
-    def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        loader = self._build_loader()
-        if worker_info is not None:
-            np.random.seed(np.random.randint(0, 2**31 - 1) + worker_info.id)
-        while True:
-            yield loader.get_batch()
-
-    def get_state(self):
-        return {}
-
-    def set_state(self, _state):
-        return
-
-
 def tokenize_ingredient(
     name,
     subset,

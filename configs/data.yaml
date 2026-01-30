@@ -4,7 +4,7 @@
 # Choose the data pipeline:
 # - "elite": uses multiple .bin files with weighted sampling (fineweb/python/cosmo)
 # - "tinystories": uses a single train.bin (old pipeline)
-dataset_kind: "tinystories"
+dataset_kind: "elite"
 #
 # Note: the HPC scripts stage data based on DATASET_KIND env var.
 # Keep DATASET_KIND consistent with this value when running submit/continue.
@@ -19,8 +19,3 @@ data_dir: "slm_data"
 
 # TinyStories dataset settings (used when dataset_kind: "tinystories")
 # train.bin is always expected at: slm_data/train.bin
-
-# Elite DataLoader prefetching (only used for dataset_kind: "elite")
-elite_num_workers: 4
-elite_prefetch_factor: 2
-elite_persistent_workers: true

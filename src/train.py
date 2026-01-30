@@ -11,7 +11,7 @@ import torch.nn as nn
 import tiktoken
 import wandb
 
-from data import EliteDataLoader, EliteIterableDataset, get_dataloader, OUT_FILE, DEFAULT_DATA_DIR
+from data import EliteDataLoader, get_dataloader, OUT_FILE, DEFAULT_DATA_DIR
 from model import TinyLM
 
 
@@ -118,7 +118,6 @@ class Trainer:
         resume_from: str | None = None,
         resume_latest: bool = False,
         data_seed: int = 1337,
-        dataset_kind: str = "elite",
         grad_accum_steps: int = 1,
     ):
         self.model = model
@@ -136,7 +135,7 @@ class Trainer:
         self.start_step = 0
         self.grad_accum_steps = max(1, int(grad_accum_steps))
 
-        self.loader_kind = dataset_kind
+        self.loader_kind = "elite" if hasattr(data_loader, "get_batch") else "tinystories"
         self.batch_size = getattr(data_loader, "B", None) or getattr(data_loader, "batch_size", None)
         self.data_seed = int(data_seed)
         if self.loader_kind == "elite":
@@ -267,8 +266,8 @@ class Trainer:
         self.model.eval()
 
         prompts = [
-            "The dog is",
-            "Once upon a time",
+            "The cold war is generally known for",
+            "def fibonacci(n):",
         ]
 
         print(f"\n{'=' * 60}")
@@ -316,14 +315,17 @@ class Trainer:
             step_loss = 0.0
 
             for _ in range(self.grad_accum_steps):
-                if data_iter is None:
-                    data_iter = iter(self.data_loader)
-                assert data_iter is not None
-                try:
-                    x, y = next(data_iter)
-                except StopIteration:
-                    data_iter = iter(self.data_loader)
-                    x, y = next(data_iter)
+                if self.loader_kind == "elite":
+                    x, y = self.data_loader.get_batch()
+                else:
+                    if data_iter is None:
+                        data_iter = iter(self.data_loader)
+                    assert data_iter is not None
+                    try:
+                        x, y = next(data_iter)
+                    except StopIteration:
+                        data_iter = iter(self.data_loader)
+                        x, y = next(data_iter)
 
                 x, y = x.to(self.device), y.to(self.device)
 
@@ -412,6 +414,7 @@ class Trainer:
             payload.update(
                 {
                     "data_seed": self.data_seed,
+                    "data_indices": list(getattr(self.data_loader, "indices", [])),
                     "np_rng_state": np.random.get_state(),
                 }
             )
@@ -428,6 +431,11 @@ class Trainer:
             np_rng_state = checkpoint.get("np_rng_state")
             if np_rng_state is not None:
                 np.random.set_state(np_rng_state)
+            data_indices = checkpoint.get("data_indices")
+            if data_indices is not None and len(data_indices) == len(self.data_loader.indices):
+                self.data_loader.indices = list(data_indices)
+            elif data_indices is not None:
+                print("Warning: data_indices size mismatch; sampler state not restored.")
         return checkpoint["step"]
 
 
@@ -446,9 +454,6 @@ def main():
         "data_dir": None,
         "data_path": os.path.join(DEFAULT_DATA_DIR, "train.bin"),
         "data_weights": None,
-        "elite_num_workers": 4,
-        "elite_prefetch_factor": 2,
-        "elite_persistent_workers": True,
         "context_size": CONTEXT_SIZE,
         "batch_size": BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
@@ -493,9 +498,6 @@ def main():
     parser.add_argument("--resume_latest", action="store_true", default=None)
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--data_seed", type=int, default=None)
-    parser.add_argument("--elite_num_workers", type=int, default=None)
-    parser.add_argument("--elite_prefetch_factor", type=int, default=None)
-    parser.add_argument("--elite_persistent_workers", action="store_true", default=None)
     parser.add_argument("--emb_dim", type=int, default=None)
     parser.add_argument("--n_layers", type=int, default=None)
     parser.add_argument("--n_heads", type=int, default=None)
@@ -591,26 +593,17 @@ def main():
         if not data_dir:
             raise ValueError("data_dir must be set for dataset_kind 'elite'.")
         weights = settings.get("data_weights")
-        dataset = EliteIterableDataset(
-            data_dir=data_dir,
-            batch_size=settings["batch_size"],
-            context_size=settings["context_size"],
-            weights=weights,
-        )
-        num_workers = max(0, int(settings["elite_num_workers"]))
-        prefetch_factor = settings["elite_prefetch_factor"]
-        persistent_workers = bool(settings["elite_persistent_workers"])
-        dl_kwargs = {}
-        if num_workers > 0:
-            dl_kwargs["prefetch_factor"] = prefetch_factor
-            dl_kwargs["persistent_workers"] = persistent_workers
-        data_loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=None,
-            num_workers=num_workers,
-            pin_memory=True,
-            **dl_kwargs,
-        )
+        if weights is None:
+            data_loader = EliteDataLoader(
+                data_dir=data_dir, B=settings["batch_size"], L=settings["context_size"]
+            )
+        else:
+            data_loader = EliteDataLoader(
+                data_dir=data_dir,
+                B=settings["batch_size"],
+                L=settings["context_size"],
+                weights=weights,
+            )
     else:
         data_path = _resolve_path(repo_root, settings["data_path"])
         if data_path is None:
@@ -637,7 +630,6 @@ def main():
         resume_latest=settings["resume_latest"],
         resume_from=settings["resume_from"],
         data_seed=settings["data_seed"],
-        dataset_kind=settings["dataset_kind"],
         grad_accum_steps=settings["grad_accum_steps"],
         use_wandb=settings["use_wandb"],
         wandb_project=settings["wandb_project"],

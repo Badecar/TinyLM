@@ -6,10 +6,10 @@
 #BSUB -q gpua100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -R "select[gpu80gb]"
-#BSUB -n 4
+#BSUB -n 8
 #BSUB -R "rusage[mem=16GB]"   # Increased for staging overhead
 #BSUB -R "span[hosts=1]"
-#BSUB -W 18:00
+#BSUB -W 0:10
 #BSUB -B
 #BSUB -N
 
@@ -31,8 +31,8 @@ NODE_DATA="/tmp/${USER}_tinylm_data"
 mkdir -p "$NODE_DATA"
 
 echo "Staging data: Home -> Local SSD ($NODE_DATA)..."
-# Replace '~/slm_data/train.bin' with your actual path in Home
-cp ~/slm_data/train.bin "$NODE_DATA/"
+# Copy refined bins to local SSD
+cp ~/slm_data/*.bin "$NODE_DATA/"
 
 # 3. UV Virtual Environment Logic
 # We sync before running. UV is fast enough to do this every time.
@@ -42,7 +42,7 @@ uv sync
 # 4. Run the Training Burn
 # We pass the LOCAL_DATA path to your script
 echo "Starting training at: $(date)"
-uv run src/main.py --data_path "$NODE_DATA/train.bin" --batch_size 64
+uv run src/main.py --data_dir "$NODE_DATA" --batch_size 64
 
 # 5. Cleanup
 # Removing the data from the local node to keep the cluster healthy

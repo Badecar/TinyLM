@@ -37,7 +37,7 @@ uv sync
 # 4. Run the Training Burn (Resume)
 echo "Starting resume training at: $(date)"
 uv run src/main.py \
-  --data_path "$NODE_DATA/train.bin" \
+  --data_dir "$NODE_DATA" \
   --batch_size 64 \
   --resume_latest \
   --max_steps 160000

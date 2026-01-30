@@ -6,8 +6,12 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-OUT_DIR = os.path.expanduser(os.environ.get("TINYLM_DATA_DIR", "~/slm_data"))
-OUT_FILE = os.path.expanduser(os.environ.get("TINYLM_DATA_FILE", os.path.join(OUT_DIR, "train.bin")))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "slm_data")
+OUT_DIR = os.path.expanduser(os.environ.get("TINYLM_DATA_DIR", DEFAULT_DATA_DIR))
+OUT_FILE = os.path.expanduser(
+    os.environ.get("TINYLM_DATA_FILE", os.path.join(OUT_DIR, "train.bin"))
+)
 os.makedirs(os.path.dirname(OUT_FILE), exist_ok=True)
 
 class TokenDataset(Dataset):

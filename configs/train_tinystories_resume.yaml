@@ -1,0 +1,9 @@
+context_size: 512
+batch_size: 64
+learning_rate: 0.0006
+max_steps: 160000
+checkpoint_dir: "~/checkpoints"
+resume_latest: true
+# resume_from: version folder name under checkpoint_dir, e.g. "v1"
+resume_from:
+wandb_config: "configs/wandb.yaml"

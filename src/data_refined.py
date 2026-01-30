@@ -68,10 +68,13 @@ class EliteDataLoader:
             
         return torch.stack(batch_x), torch.stack(batch_y)
 
-def tokenize_ingredient(name, subset, split, out_path, limit_tokens=2e9, buffer_size=100_000):
+def tokenize_ingredient(name, subset, split, out_path, limit_tokens=2e9, buffer_size=100_000, use_data_dir=False):
     """Tokenizes a specific dataset from HF and saves to binary."""
     enc = tiktoken.get_encoding("gpt2")
-    ds = load_dataset(name, subset, split=split, streaming=True)
+    if use_data_dir:
+        ds = load_dataset(name, data_dir=subset, split=split, streaming=True)
+    else:
+        ds = load_dataset(name, subset, split=split, streaming=True)
     
     token_count = 0
     token_buffer = []  # Accumulate tokens before writing
@@ -119,16 +122,18 @@ if __name__ == "__main__":
 
     if args.prepare:
         os.makedirs(os.path.expanduser("~/slm_data"), exist_ok=True)
-        # Tokenize the Elite Mixture (Targeting 2B tokens each for safety)
+        
         datasets_to_prepare = [
             ("HuggingFaceFW/fineweb-edu", "sample-10BT", "train", "~/slm_data/fineweb.bin"),
             ("bigcode/the-stack-dedup", "python", "train", "~/slm_data/python.bin"),
-            ("HuggingFaceTB/cosmopedia", "default", "train", "~/slm_data/cosmo.bin")
+            # Changed 'default' to 'web_samples_v2' to fix the ValueError
+            ("HuggingFaceTB/cosmopedia", "web_samples_v2", "train", "~/slm_data/cosmo.bin")
         ]
         
-        for name, subset, split, out_path in tqdm(datasets_to_prepare, desc="Preparing datasets"):
-            expanded_path = os.path.expanduser(out_path)
-            if os.path.exists(expanded_path):
-                print(f"Skipping {out_path} - already exists")
+        for name, subset, split, out_path in datasets_to_prepare:
+            # Added a simple check to skip if the file already exists (saves time)
+            full_out_path = os.path.expanduser(out_path)
+            if os.path.exists(full_out_path):
+                print(f"Skipping {name} - already exists at {out_path}")
                 continue
-            tokenize_ingredient(name, subset, split, out_path)
+            tokenize_ingredient(name, subset, split, full_out_path)

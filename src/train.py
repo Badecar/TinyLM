@@ -3,6 +3,8 @@ import math
 import os
 import re
 
+import yaml
+
 import torch
 import torch.nn as nn
 import tiktoken
@@ -62,7 +64,9 @@ def _get_latest_version_dir(base_dir: str) -> str | None:
 def _resolve_checkpoint_dir(checkpoint_dir: str, resume_latest: bool, resume_from: str | None) -> str:
     checkpoint_dir = os.path.expanduser(checkpoint_dir)
     if resume_from:
-        return os.path.dirname(os.path.expanduser(resume_from))
+        if os.path.sep in resume_from or resume_from.endswith(".pt"):
+            return os.path.dirname(os.path.expanduser(resume_from))
+        return os.path.join(checkpoint_dir, resume_from)
     if resume_latest:
         if _is_version_dir(checkpoint_dir):
             return checkpoint_dir
@@ -76,6 +80,15 @@ def _resolve_checkpoint_dir(checkpoint_dir: str, resume_latest: bool, resume_fro
     if latest_dir is not None:
         next_version = int(os.path.basename(latest_dir)[1:]) + 1
     return os.path.join(checkpoint_dir, f"v{next_version}")
+
+
+def _resolve_resume_from(checkpoint_dir: str, resume_from: str | None) -> str | None:
+    if not resume_from:
+        return None
+    checkpoint_dir = os.path.expanduser(checkpoint_dir)
+    if os.path.sep in resume_from or resume_from.endswith(".pt"):
+        return os.path.expanduser(resume_from)
+    return os.path.join(checkpoint_dir, resume_from, "latest.pt")
 
 
 class Trainer:
@@ -183,7 +196,7 @@ class Trainer:
             self.wandb_run = None
 
         if resume_latest or resume_from:
-            checkpoint_path = os.path.expanduser(resume_from) if resume_from else None
+            checkpoint_path = _resolve_resume_from(checkpoint_dir, resume_from)
             if resume_latest:
                 checkpoint_path = self._get_latest_checkpoint()
             if checkpoint_path and os.path.exists(checkpoint_path):
@@ -403,21 +416,71 @@ def main():
     LEARNING_RATE = 6e-4
     MAX_STEPS = 80000
 
+    defaults = {
+        "data_path": OUT_FILE,
+        "context_size": CONTEXT_SIZE,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "max_steps": MAX_STEPS,
+        "checkpoint_dir": "~/checkpoints",
+        "resume_latest": False,
+        "resume_from": None,
+        "wandb_config": None,
+        "use_wandb": True,
+        "wandb_project": "TinyLM",
+        "wandb_entity": "badecar-danmarks-tekniske-universitet-dtu",
+        "wandb_api_key": None,
+        "best_wandb_interval": 2500,
+    }
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default=OUT_FILE)
-    parser.add_argument("--context_size", type=int, default=CONTEXT_SIZE)
-    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--learning_rate", type=float, default=LEARNING_RATE)
-    parser.add_argument("--max_steps", type=int, default=MAX_STEPS)
-    parser.add_argument("--checkpoint_dir", type=str, default="~/checkpoints")
-    parser.add_argument("--resume_latest", action="store_true", help="Resume from latest checkpoint")
-    parser.add_argument("--resume_from", type=str, default=None, help="Path to a checkpoint file")
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
+    parser.add_argument("--wandb_config", type=str, default=None, help="Path to W&B YAML config")
+    parser.add_argument("--data_path", type=str, default=None)
+    parser.add_argument("--context_size", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--resume_latest", action="store_true", default=None)
+    parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--use_wandb", action="store_true", default=None)
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_api_key", type=str, default=None)
+    parser.add_argument("--best_wandb_interval", type=int, default=None)
     args = parser.parse_args()
 
+    config = {}
+    if args.config:
+        with open(args.config, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+        if not isinstance(config, dict):
+            raise ValueError("Config file must contain a YAML mapping at the top level.")
+
+    settings = defaults.copy()
+    for key, value in config.items():
+        if key in settings and value is not None:
+            settings[key] = value
+    if settings.get("wandb_config"):
+        with open(settings["wandb_config"], "r", encoding="utf-8") as handle:
+            wandb_config = yaml.safe_load(handle) or {}
+        if not isinstance(wandb_config, dict):
+            raise ValueError("W&B config must contain a YAML mapping at the top level.")
+        for key, value in wandb_config.items():
+            if key in settings and value is not None:
+                settings[key] = value
+    for key, value in vars(args).items():
+        if key not in {"config", "wandb_config"} and value is not None:
+            settings[key] = value
+
+    if settings.get("wandb_api_key"):
+        os.environ["WANDB_API_KEY"] = str(settings["wandb_api_key"])
+
     checkpoint_dir = _resolve_checkpoint_dir(
-        args.checkpoint_dir,
-        resume_latest=args.resume_latest,
-        resume_from=args.resume_from,
+        settings["checkpoint_dir"],
+        resume_latest=settings["resume_latest"],
+        resume_from=settings["resume_from"],
     )
     print(f"Using checkpoint directory: {checkpoint_dir}")
 
@@ -427,13 +490,13 @@ def main():
         n_layers=12,
         n_heads=12,
         att_dim=64,
-        max_seq_len=args.context_size,
+        max_seq_len=settings["context_size"],
     )
 
     train_loader = get_dataloader(
-        data_path=args.data_path,
-        context_size=args.context_size,
-        batch_size=args.batch_size,
+        data_path=os.path.expanduser(settings["data_path"]),
+        context_size=settings["context_size"],
+        batch_size=settings["batch_size"],
         shuffle=True,
         num_workers=4,
         pin_memory=True,
@@ -442,15 +505,19 @@ def main():
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
-        learning_rate=args.learning_rate,
+        learning_rate=settings["learning_rate"],
         weight_decay=0.1,
         warmup_steps=2000,
-        max_steps=args.max_steps,
+        max_steps=settings["max_steps"],
         checkpoint_dir=checkpoint_dir,
         verbose=True,
         generation_interval=500,
-        resume_latest=args.resume_latest,
-        resume_from=args.resume_from,
+        resume_latest=settings["resume_latest"],
+        resume_from=settings["resume_from"],
+        use_wandb=settings["use_wandb"],
+        wandb_project=settings["wandb_project"],
+        wandb_entity=settings["wandb_entity"],
+        best_wandb_interval=settings["best_wandb_interval"],
     )
 
     trainer.train()

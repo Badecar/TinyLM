@@ -16,10 +16,6 @@
 # 1. Environment Setup
 mkdir -p logs
 export PATH="$HOME/.local/bin:$PATH"
-# Yes, this is the wandb API key. Yes, it is freely visible here on github. No, I am not worried about it.
-export WANDB_API_KEY="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"
-export WANDB_ENTITY="badecar-danmarks-tekniske-universitet-dtu"
-export WANDB_PROJECT="TinyLM"
 
 # Load essential modules for GPU training
 module load cuda/12.1
@@ -30,9 +26,26 @@ module load cuda/12.1
 NODE_DATA="/tmp/${USER}_tinylm_data"
 mkdir -p "$NODE_DATA"
 
-echo "Staging data: Home -> Local SSD ($NODE_DATA)..."
-# Copy refined bins to local SSD
-cp ~/slm_data/*.bin "$NODE_DATA/"
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+DATASET_KIND="${DATASET_KIND:-elite}" # elite | tinystories
+DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/slm_data}"
+if [ "$DATASET_KIND" = "elite" ]; then
+  CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/train_elite.yaml}"
+elif [ "$DATASET_KIND" = "tinystories" ]; then
+  CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/train_tinystories.yaml}"
+else
+  CONFIG_PATH="${CONFIG_PATH:-}"
+fi
+
+echo "Staging data: ${DATA_DIR} -> Local SSD ($NODE_DATA)..."
+if [ "$DATASET_KIND" = "elite" ]; then
+  cp "$DATA_DIR"/*.bin "$NODE_DATA/"
+elif [ "$DATASET_KIND" = "tinystories" ]; then
+  cp "$DATA_DIR"/train.bin "$NODE_DATA/"
+else
+  echo "Unknown DATASET_KIND: $DATASET_KIND (expected elite or tinystories)"
+  exit 1
+fi
 
 # 3. UV Virtual Environment Logic
 # We sync before running. UV is fast enough to do this every time.
@@ -42,7 +55,11 @@ uv sync
 # 4. Run the Training Burn
 # We pass the LOCAL_DATA path to your script
 echo "Starting training at: $(date)"
-uv run src/main.py --data_dir "$NODE_DATA" --batch_size 64
+if [ "$DATASET_KIND" = "elite" ]; then
+  uv run src/main.py --config "$CONFIG_PATH" --data_dir "$NODE_DATA"
+else
+  uv run src/train.py --config "$CONFIG_PATH" --data_path "$NODE_DATA/train.bin"
+fi
 
 # 5. Cleanup
 # Removing the data from the local node to keep the cluster healthy

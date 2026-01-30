@@ -3,6 +3,8 @@ import math
 import os
 import re
 
+import yaml
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -63,7 +65,9 @@ def _get_latest_version_dir(base_dir: str) -> str | None:
 def _resolve_checkpoint_dir(checkpoint_dir: str, resume_latest: bool, resume_from: str | None) -> str:
     checkpoint_dir = os.path.expanduser(checkpoint_dir)
     if resume_from:
-        return os.path.dirname(os.path.expanduser(resume_from))
+        if os.path.sep in resume_from or resume_from.endswith(".pt"):
+            return os.path.dirname(os.path.expanduser(resume_from))
+        return os.path.join(checkpoint_dir, resume_from)
     if resume_latest:
         if _is_version_dir(checkpoint_dir):
             return checkpoint_dir
@@ -77,6 +81,15 @@ def _resolve_checkpoint_dir(checkpoint_dir: str, resume_latest: bool, resume_fro
     if latest_dir is not None:
         next_version = int(os.path.basename(latest_dir)[1:]) + 1
     return os.path.join(checkpoint_dir, f"v{next_version}")
+
+
+def _resolve_resume_from(checkpoint_dir: str, resume_from: str | None) -> str | None:
+    if not resume_from:
+        return None
+    checkpoint_dir = os.path.expanduser(checkpoint_dir)
+    if os.path.sep in resume_from or resume_from.endswith(".pt"):
+        return os.path.expanduser(resume_from)
+    return os.path.join(checkpoint_dir, resume_from, "latest.pt")
 
 
 class Trainer:
@@ -188,7 +201,7 @@ class Trainer:
             self.wandb_run = None
 
         if resume_latest or resume_from:
-            checkpoint_path = os.path.expanduser(resume_from) if resume_from else None
+            checkpoint_path = _resolve_resume_from(checkpoint_dir, resume_from)
             if resume_latest:
                 checkpoint_path = self._get_latest_checkpoint()
             if checkpoint_path and os.path.exists(checkpoint_path):
@@ -421,22 +434,78 @@ def main():
     MAX_STEPS = 80000
     USE_ACTIVATION_CHECKPOINTING = True
 
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    default_data_dir = os.path.join(repo_root, "slm_data")
+
+    defaults = {
+        "data_dir": default_data_dir,
+        "context_size": CONTEXT_SIZE,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "max_steps": MAX_STEPS,
+        "checkpoint_dir": "~/checkpoints",
+        "resume_latest": False,
+        "resume_from": None,
+        "data_seed": 1337,
+        "use_activation_checkpointing": USE_ACTIVATION_CHECKPOINTING,
+        "wandb_config": None,
+        "use_wandb": True,
+        "wandb_project": "TinyLM",
+        "wandb_entity": "badecar-danmarks-tekniske-universitet-dtu",
+        "wandb_api_key": None,
+        "best_wandb_interval": 2500,
+    }
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="~/slm_data")
-    parser.add_argument("--context_size", type=int, default=CONTEXT_SIZE)
-    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--learning_rate", type=float, default=LEARNING_RATE)
-    parser.add_argument("--max_steps", type=int, default=MAX_STEPS)
-    parser.add_argument("--checkpoint_dir", type=str, default="~/checkpoints")
-    parser.add_argument("--resume_latest", action="store_true", help="Resume from latest checkpoint")
-    parser.add_argument("--resume_from", type=str, default=None, help="Path to a checkpoint file")
-    parser.add_argument("--data_seed", type=int, default=1337)
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
+    parser.add_argument("--wandb_config", type=str, default=None, help="Path to W&B YAML config")
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument("--context_size", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--resume_latest", action="store_true", default=None)
+    parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--data_seed", type=int, default=None)
+    parser.add_argument("--use_activation_checkpointing", action="store_true", default=None)
+    parser.add_argument("--use_wandb", action="store_true", default=None)
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_api_key", type=str, default=None)
+    parser.add_argument("--best_wandb_interval", type=int, default=None)
     args = parser.parse_args()
 
+    config = {}
+    if args.config:
+        with open(args.config, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+        if not isinstance(config, dict):
+            raise ValueError("Config file must contain a YAML mapping at the top level.")
+
+    settings = defaults.copy()
+    for key, value in config.items():
+        if key in settings and value is not None:
+            settings[key] = value
+    if settings.get("wandb_config"):
+        with open(settings["wandb_config"], "r", encoding="utf-8") as handle:
+            wandb_config = yaml.safe_load(handle) or {}
+        if not isinstance(wandb_config, dict):
+            raise ValueError("W&B config must contain a YAML mapping at the top level.")
+        for key, value in wandb_config.items():
+            if key in settings and value is not None:
+                settings[key] = value
+    for key, value in vars(args).items():
+        if key not in {"config", "wandb_config"} and value is not None:
+            settings[key] = value
+
+    if settings.get("wandb_api_key"):
+        os.environ["WANDB_API_KEY"] = str(settings["wandb_api_key"])
+
     checkpoint_dir = _resolve_checkpoint_dir(
-        args.checkpoint_dir,
-        resume_latest=args.resume_latest,
-        resume_from=args.resume_from,
+        settings["checkpoint_dir"],
+        resume_latest=settings["resume_latest"],
+        resume_from=settings["resume_from"],
     )
     print(f"Using checkpoint directory: {checkpoint_dir}")
 
@@ -446,29 +515,33 @@ def main():
         n_layers=16,
         n_heads=16,
         att_dim=64,
-        max_seq_len=args.context_size,
-        use_activation_checkpointing=USE_ACTIVATION_CHECKPOINTING,
+        max_seq_len=settings["context_size"],
+        use_activation_checkpointing=bool(settings["use_activation_checkpointing"]),
     )
 
     data_loader = EliteDataLoader(
-        data_dir=os.path.expanduser(args.data_dir),
-        B=args.batch_size,
-        L=args.context_size,
+        data_dir=os.path.expanduser(settings["data_dir"]),
+        B=settings["batch_size"],
+        L=settings["context_size"],
     )
 
     trainer = Trainer(
         model=model,
         data_loader=data_loader,
-        learning_rate=args.learning_rate,
+        learning_rate=settings["learning_rate"],
         weight_decay=0.1,
         warmup_steps=3000,
-        max_steps=args.max_steps,
+        max_steps=settings["max_steps"],
         checkpoint_dir=checkpoint_dir,
         verbose=True,
         generation_interval=1000,
-        resume_latest=args.resume_latest,
-        resume_from=args.resume_from,
-        data_seed=args.data_seed,
+        resume_latest=settings["resume_latest"],
+        resume_from=settings["resume_from"],
+        data_seed=settings["data_seed"],
+        use_wandb=settings["use_wandb"],
+        wandb_project=settings["wandb_project"],
+        wandb_entity=settings["wandb_entity"],
+        best_wandb_interval=settings["best_wandb_interval"],
     )
 
     trainer.train()

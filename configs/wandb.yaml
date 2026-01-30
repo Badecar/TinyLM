@@ -1,0 +1,5 @@
+use_wandb: true
+wandb_project: "TinyLM"
+wandb_entity: "badecar-danmarks-tekniske-universitet-dtu"
+wandb_api_key:
+best_wandb_interval: 2500

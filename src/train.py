@@ -5,17 +5,19 @@ import re
 
 import yaml
 
+import numpy as np
 import torch
 import torch.nn as nn
 import tiktoken
 import wandb
 
-from data import get_dataloader, OUT_FILE
+from data import EliteDataLoader, EliteIterableDataset, get_dataloader, OUT_FILE, DEFAULT_DATA_DIR
 from model import TinyLM
 
 
 class CrossEntropyLoss(nn.Module):
     """Cross-entropy loss for language modeling with label smoothing support."""
+
     def __init__(self, ignore_index: int = -100, label_smoothing: float = 0.0):
         super().__init__()
         self.ignore_index = ignore_index
@@ -27,18 +29,7 @@ class CrossEntropyLoss(nn.Module):
         )
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Compute cross-entropy loss for language modeling.
-
-        Args:
-            logits: Model output of shape (B, T, vocab_size)
-            targets: Target token indices of shape (B, T)
-
-        Returns:
-            Scalar loss value
-        """
         B, T, V = logits.shape
-        # Reshape for cross-entropy: (B*T, V) and (B*T,)
         logits = logits.view(B * T, V)
         targets = targets.view(B * T)
         return self.loss_fn(logits, targets)
@@ -91,12 +82,22 @@ def _resolve_resume_from(checkpoint_dir: str, resume_from: str | None) -> str | 
     return os.path.join(checkpoint_dir, resume_from, "latest.pt")
 
 
+def _resolve_path(repo_root: str, path: str | None) -> str | None:
+    if path is None:
+        return None
+    expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded):
+        return os.path.join(repo_root, expanded)
+    return expanded
+
+
 class Trainer:
     """Training loop for TinyLM."""
+
     def __init__(
         self,
         model: TinyLM,
-        train_loader: torch.utils.data.DataLoader,
+        data_loader,
         learning_rate: float = 3e-4,
         weight_decay: float = 0.1,
         betas: tuple = (0.9, 0.95),
@@ -116,9 +117,12 @@ class Trainer:
         best_wandb_interval: int = 2500,
         resume_from: str | None = None,
         resume_latest: bool = False,
+        data_seed: int = 1337,
+        dataset_kind: str = "elite",
+        grad_accum_steps: int = 1,
     ):
         self.model = model
-        self.train_loader = train_loader
+        self.data_loader = data_loader
         self.grad_clip = grad_clip
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
@@ -130,8 +134,14 @@ class Trainer:
         self.use_wandb = use_wandb
         self.best_wandb_interval = best_wandb_interval
         self.start_step = 0
+        self.grad_accum_steps = max(1, int(grad_accum_steps))
 
-        # Device setup (must be before torch.compile)
+        self.loader_kind = dataset_kind
+        self.batch_size = getattr(data_loader, "B", None) or getattr(data_loader, "batch_size", None)
+        self.data_seed = int(data_seed)
+        if self.loader_kind == "elite":
+            np.random.seed(self.data_seed)
+
         if device == "auto":
             self.device = (
                 "cuda"
@@ -151,16 +161,10 @@ class Trainer:
 
         self.model = self.model.to(self.device)
 
-        # Loss function
         self.loss_fn = CrossEntropyLoss()
-
-        # Optimizer with weight decay
         self.optimizer = self._configure_optimizer(learning_rate, weight_decay, betas)
-
-        # Learning rate scheduler with warmup
         self.lr_scheduler = self._get_lr_scheduler(learning_rate)
 
-        # Tokenizer for text generation
         self.enable_generation = self.verbose or self.use_wandb
         if self.enable_generation:
             self.tokenizer = tiktoken.get_encoding("gpt2")
@@ -186,8 +190,10 @@ class Trainer:
                     "eval_interval": eval_interval,
                     "generation_interval": generation_interval,
                     "best_wandb_interval": best_wandb_interval,
-                    "batch_size": getattr(train_loader, "batch_size", None),
+                "grad_accum_steps": self.grad_accum_steps,
+                    "batch_size": self.batch_size,
                     "device": self.device,
+                    "loader_kind": self.loader_kind,
                 },
                 settings=wandb.Settings(console="wrap"),
             )
@@ -212,7 +218,6 @@ class Trainer:
                 )
 
     def _configure_optimizer(self, lr, weight_decay, betas):
-        """Configure optimizer with weight decay only on certain parameters."""
         decay_params = []
         no_decay_params = []
 
@@ -231,7 +236,6 @@ class Trainer:
         return torch.optim.AdamW(optim_groups, lr=lr, betas=betas)
 
     def _get_lr_scheduler(self, max_lr):
-        """Cosine annealing with linear warmup."""
         def lr_lambda(step):
             if step < self.warmup_steps:
                 return step / self.warmup_steps
@@ -257,7 +261,6 @@ class Trainer:
 
     @torch.no_grad()
     def generate_samples(self, step: int):
-        """Generate sample text to monitor training progress."""
         if not self.enable_generation:
             return
 
@@ -276,9 +279,7 @@ class Trainer:
         for prompt in prompts:
             tokens = self.tokenizer.encode_ordinary(prompt)
             idx = torch.tensor([tokens], dtype=torch.long, device=self.device)
-
             generated = self.model.generate(idx, max_new_tokens=50, temperature=0.8)
-
             generated_tokens = generated[0].tolist()
             text = self.tokenizer.decode(generated_tokens)
             samples.append({"step": step, "prompt": prompt, "output": text})
@@ -297,39 +298,52 @@ class Trainer:
         self.model.train()
 
     def train(self):
-        """Main training loop."""
         self.model.train()
-        data_iter = iter(self.train_loader)
+        data_iter = None
 
         running_loss = 0.0
         best_loss = float("inf")
 
         print(f"Training on {self.device}")
         print(f"Total parameters: {sum(p.numel() for p in self.model.parameters()):,}")
-        print(f"Trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
+        print(
+            "Trainable parameters: "
+            f"{sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}"
+        )
 
         for step in range(self.start_step, self.max_steps):
-            try:
-                x, y = next(data_iter)
-            except StopIteration:
-                data_iter = iter(self.train_loader)
-                x, y = next(data_iter)
-
-            x, y = x.to(self.device), y.to(self.device)
-
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = self.model(x)
-                loss = self.loss_fn(logits, y)
-
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"\nWARNING: NaN/Inf loss detected at step {step + 1}")
-                print(f"Input range: [{x.min().item():.2f}, {x.max().item():.2f}]")
-                print(f"Logits range: [{logits.min().item():.2f}, {logits.max().item():.2f}]")
-                print("Skipping this batch...")
-                continue
-
             self.optimizer.zero_grad()
-            loss.backward()
+            step_loss = 0.0
+
+            for _ in range(self.grad_accum_steps):
+                if data_iter is None:
+                    data_iter = iter(self.data_loader)
+                assert data_iter is not None
+                try:
+                    x, y = next(data_iter)
+                except StopIteration:
+                    data_iter = iter(self.data_loader)
+                    x, y = next(data_iter)
+
+                x, y = x.to(self.device), y.to(self.device)
+
+                if self.device == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        logits = self.model(x)
+                        loss = self.loss_fn(logits, y)
+                else:
+                    logits = self.model(x)
+                    loss = self.loss_fn(logits, y)
+
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"\nWARNING: NaN/Inf loss detected at step {step + 1}")
+                    print(f"Input range: [{x.min().item():.2f}, {x.max().item():.2f}]")
+                    print(f"Logits range: [{logits.min().item():.2f}, {logits.max().item():.2f}]")
+                    print("Skipping this micro-batch...")
+                    continue
+
+                (loss / self.grad_accum_steps).backward()
+                step_loss += loss.item()
 
             if self.grad_clip > 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
@@ -339,7 +353,7 @@ class Trainer:
             self.optimizer.step()
             self.lr_scheduler.step()
 
-            running_loss += loss.item()
+            running_loss += step_loss / max(1, self.grad_accum_steps)
 
             if (step + 1) % self.log_interval == 0:
                 avg_loss = running_loss / self.log_interval
@@ -364,7 +378,7 @@ class Trainer:
                 self.generate_samples(step + 1)
 
             if (step + 1) % self.eval_interval == 0:
-                avg_loss = loss.item()
+                avg_loss = step_loss / max(1, self.grad_accum_steps)
                 if avg_loss < best_loss:
                     best_loss = avg_loss
                     self.save_checkpoint(step + 1, "best.pt")
@@ -388,44 +402,72 @@ class Trainer:
         return self.model
 
     def save_checkpoint(self, step: int, filename: str):
-        """Save model checkpoint."""
+        payload = {
+            "step": step,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.lr_scheduler.state_dict(),
+        }
+        if self.loader_kind == "elite":
+            payload.update(
+                {
+                    "data_seed": self.data_seed,
+                    "np_rng_state": np.random.get_state(),
+                }
+            )
         path = os.path.join(self.checkpoint_dir, filename)
-        torch.save(
-            {
-                "step": step,
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "scheduler_state_dict": self.lr_scheduler.state_dict(),
-            },
-            path,
-        )
+        torch.save(payload, path)
 
     def load_checkpoint(self, path: str):
-        """Load model checkpoint."""
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.lr_scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if self.loader_kind == "elite":
+            self.data_seed = int(checkpoint.get("data_seed", self.data_seed))
+            np_rng_state = checkpoint.get("np_rng_state")
+            if np_rng_state is not None:
+                np.random.set_state(np_rng_state)
         return checkpoint["step"]
 
 
 def main():
-    # --- HPC Optimized Config ---
-    CONTEXT_SIZE = 512
-    BATCH_SIZE = 64
+    CONTEXT_SIZE = 1024
+    BATCH_SIZE = 128
     LEARNING_RATE = 6e-4
     MAX_STEPS = 80000
+    USE_ACTIVATION_CHECKPOINTING = True
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
     defaults = {
-        "data_path": OUT_FILE,
+        "train_config": "configs/train.yaml",
+        "dataset_kind": None,
+        "data_dir": None,
+        "data_path": os.path.join(DEFAULT_DATA_DIR, "train.bin"),
+        "data_weights": None,
+        "elite_num_workers": 4,
+        "elite_prefetch_factor": 2,
+        "elite_persistent_workers": True,
         "context_size": CONTEXT_SIZE,
         "batch_size": BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
         "max_steps": MAX_STEPS,
+        "warmup_steps": 3000,
+        "grad_accum_steps": 1,
+        "generation_interval": 1000,
         "checkpoint_dir": "~/checkpoints",
         "resume_latest": False,
         "resume_from": None,
-        "wandb_config": None,
+        "data_seed": 1337,
+        "emb_dim": 1024,
+        "n_layers": 16,
+        "n_heads": 16,
+        "att_dim": 64,
+        "attention_impl": "sdpa",
+        "use_activation_checkpointing": USE_ACTIVATION_CHECKPOINTING,
+        "data_config": "configs/data.yaml",
+        "wandb_config": "configs/wandb.yaml",
         "use_wandb": True,
         "wandb_project": "TinyLM",
         "wandb_entity": "badecar-danmarks-tekniske-universitet-dtu",
@@ -434,16 +476,32 @@ def main():
     }
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
+    parser.add_argument("--config", type=str, default=None, help="Path to training YAML config")
+    parser.add_argument("--data_config", type=str, default=None, help="Path to data YAML config")
     parser.add_argument("--wandb_config", type=str, default=None, help="Path to W&B YAML config")
-    parser.add_argument("--data_path", type=str, default=None)
+    parser.add_argument("--dataset_kind", type=str, default=None, choices=["elite", "tinystories"])
+    parser.add_argument("--data_dir", type=str, default=None)
+    # data_path removed; TinyStories always uses slm_data/train.bin
     parser.add_argument("--context_size", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--warmup_steps", type=int, default=None)
+    parser.add_argument("--grad_accum_steps", type=int, default=None)
+    parser.add_argument("--generation_interval", type=int, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--resume_latest", action="store_true", default=None)
     parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--data_seed", type=int, default=None)
+    parser.add_argument("--elite_num_workers", type=int, default=None)
+    parser.add_argument("--elite_prefetch_factor", type=int, default=None)
+    parser.add_argument("--elite_persistent_workers", action="store_true", default=None)
+    parser.add_argument("--emb_dim", type=int, default=None)
+    parser.add_argument("--n_layers", type=int, default=None)
+    parser.add_argument("--n_heads", type=int, default=None)
+    parser.add_argument("--att_dim", type=int, default=None)
+    parser.add_argument("--attention_impl", type=str, default=None, choices=["sdpa", "manual"])
+    parser.add_argument("--use_activation_checkpointing", action="store_true", default=None)
     parser.add_argument("--use_wandb", action="store_true", default=None)
     parser.add_argument("--wandb_project", type=str, default=None)
     parser.add_argument("--wandb_entity", type=str, default=None)
@@ -453,26 +511,59 @@ def main():
 
     config = {}
     if args.config:
-        with open(args.config, "r", encoding="utf-8") as handle:
+        config_path = _resolve_path(repo_root, args.config)
+    else:
+        config_path = _resolve_path(repo_root, defaults["train_config"])
+    if config_path and os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as handle:
             config = yaml.safe_load(handle) or {}
         if not isinstance(config, dict):
             raise ValueError("Config file must contain a YAML mapping at the top level.")
+    else:
+        raise FileNotFoundError(f"Training config not found: {config_path}")
 
     settings = defaults.copy()
     for key, value in config.items():
         if key in settings and value is not None:
             settings[key] = value
-    if settings.get("wandb_config"):
-        with open(settings["wandb_config"], "r", encoding="utf-8") as handle:
-            wandb_config = yaml.safe_load(handle) or {}
-        if not isinstance(wandb_config, dict):
-            raise ValueError("W&B config must contain a YAML mapping at the top level.")
-        for key, value in wandb_config.items():
-            if key in settings and value is not None:
-                settings[key] = value
+
+    data_config_path = settings.get("data_config")
+    if data_config_path:
+        resolved_data_path = _resolve_path(repo_root, data_config_path)
+        if resolved_data_path and os.path.exists(resolved_data_path):
+            with open(resolved_data_path, "r", encoding="utf-8") as handle:
+                data_config = yaml.safe_load(handle) or {}
+            if not isinstance(data_config, dict):
+                raise ValueError("Data config must contain a YAML mapping at the top level.")
+            for key, value in data_config.items():
+                if key in settings and value is not None:
+                    settings[key] = value
+        else:
+            raise FileNotFoundError(f"Data config not found: {resolved_data_path}")
+
+    wandb_config_path = settings.get("wandb_config")
+    if wandb_config_path:
+        wandb_path = _resolve_path(repo_root, wandb_config_path)
+        if wandb_path and os.path.exists(wandb_path):
+            with open(wandb_path, "r", encoding="utf-8") as handle:
+                wandb_config = yaml.safe_load(handle) or {}
+            if not isinstance(wandb_config, dict):
+                raise ValueError("W&B config must contain a YAML mapping at the top level.")
+            for key, value in wandb_config.items():
+                if key in settings and value is not None:
+                    settings[key] = value
+        else:
+            raise FileNotFoundError(f"W&B config not found: {wandb_path}")
+
     for key, value in vars(args).items():
-        if key not in {"config", "wandb_config"} and value is not None:
+        if key not in {"config", "data_config", "wandb_config"} and value is not None:
             settings[key] = value
+
+    if not settings.get("dataset_kind"):
+        raise ValueError("dataset_kind must be set in configs/data.yaml or via CLI.")
+    settings["dataset_kind"] = settings["dataset_kind"].lower()
+    if settings["dataset_kind"] not in {"elite", "tinystories"}:
+        raise ValueError(f"Unknown dataset_kind: {settings['dataset_kind']}")
 
     if settings.get("wandb_api_key"):
         os.environ["WANDB_API_KEY"] = str(settings["wandb_api_key"])
@@ -486,34 +577,68 @@ def main():
 
     model = TinyLM(
         vocab_size=50257,
-        emb_dim=768,
-        n_layers=12,
-        n_heads=12,
-        att_dim=64,
+        emb_dim=settings["emb_dim"],
+        n_layers=settings["n_layers"],
+        n_heads=settings["n_heads"],
+        att_dim=settings["att_dim"],
         max_seq_len=settings["context_size"],
+        attention_impl=settings["attention_impl"],
+        use_activation_checkpointing=bool(settings["use_activation_checkpointing"]),
     )
 
-    train_loader = get_dataloader(
-        data_path=os.path.expanduser(settings["data_path"]),
-        context_size=settings["context_size"],
-        batch_size=settings["batch_size"],
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
+    if settings["dataset_kind"] == "elite":
+        data_dir = _resolve_path(repo_root, settings["data_dir"])
+        if not data_dir:
+            raise ValueError("data_dir must be set for dataset_kind 'elite'.")
+        weights = settings.get("data_weights")
+        dataset = EliteIterableDataset(
+            data_dir=data_dir,
+            batch_size=settings["batch_size"],
+            context_size=settings["context_size"],
+            weights=weights,
+        )
+        num_workers = max(0, int(settings["elite_num_workers"]))
+        prefetch_factor = settings["elite_prefetch_factor"]
+        persistent_workers = bool(settings["elite_persistent_workers"])
+        dl_kwargs = {}
+        if num_workers > 0:
+            dl_kwargs["prefetch_factor"] = prefetch_factor
+            dl_kwargs["persistent_workers"] = persistent_workers
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=None,
+            num_workers=num_workers,
+            pin_memory=True,
+            **dl_kwargs,
+        )
+    else:
+        data_path = _resolve_path(repo_root, settings["data_path"])
+        if data_path is None:
+            raise ValueError("TinyStories data path resolved to None.")
+        data_loader = get_dataloader(
+            data_path=data_path,
+            context_size=settings["context_size"],
+            batch_size=settings["batch_size"],
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True,
+        )
 
     trainer = Trainer(
         model=model,
-        train_loader=train_loader,
+        data_loader=data_loader,
         learning_rate=settings["learning_rate"],
         weight_decay=0.1,
-        warmup_steps=2000,
+        warmup_steps=settings["warmup_steps"],
         max_steps=settings["max_steps"],
         checkpoint_dir=checkpoint_dir,
         verbose=True,
-        generation_interval=500,
+        generation_interval=settings["generation_interval"],
         resume_latest=settings["resume_latest"],
         resume_from=settings["resume_from"],
+        data_seed=settings["data_seed"],
+        dataset_kind=settings["dataset_kind"],
+        grad_accum_steps=settings["grad_accum_steps"],
         use_wandb=settings["use_wandb"],
         wandb_project=settings["wandb_project"],
         wandb_entity=settings["wandb_entity"],
@@ -522,6 +647,3 @@ def main():
 
     trainer.train()
 
-
-if __name__ == "__main__":
-    main()

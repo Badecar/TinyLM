@@ -1,6 +1,6 @@
 #!/bin/bash
 ### DTU HPC Job Submission Script for TinyLM ###
-#BSUB -J tinylm_burn
+#BSUB -J tinylm_train
 #BSUB -o logs/%J.out
 #BSUB -e logs/%J.err
 #BSUB -q gpua100
@@ -26,16 +26,17 @@ module load cuda/12.1
 NODE_DATA="/tmp/${USER}_tinylm_data"
 mkdir -p "$NODE_DATA"
 
-PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-DATASET_KIND="${DATASET_KIND:-elite}" # elite | tinystories
-DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/slm_data}"
-if [ "$DATASET_KIND" = "elite" ]; then
-  CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/train_elite.yaml}"
-elif [ "$DATASET_KIND" = "tinystories" ]; then
-  CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/train_tinystories.yaml}"
-else
-  CONFIG_PATH="${CONFIG_PATH:-}"
-fi
+PROJECT_ROOT="${LS_SUBCWD:-$(pwd)}"
+DATASET_KIND="$(python3 - <<PY
+import yaml
+with open("$PROJECT_ROOT/configs/data.yaml", "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+print((data.get("dataset_kind") or "elite").strip())
+PY
+)"
+DATA_DIR="$PROJECT_ROOT/slm_data"
+CONFIG_PATH="$PROJECT_ROOT/configs/train.yaml"
+DATA_CONFIG="$PROJECT_ROOT/configs/data.yaml"
 
 echo "Staging data: ${DATA_DIR} -> Local SSD ($NODE_DATA)..."
 if [ "$DATASET_KIND" = "elite" ]; then
@@ -51,15 +52,12 @@ fi
 # We sync before running. UV is fast enough to do this every time.
 echo "Syncing dependencies..."
 uv sync
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # 4. Run the Training Burn
 # We pass the LOCAL_DATA path to your script
 echo "Starting training at: $(date)"
-if [ "$DATASET_KIND" = "elite" ]; then
-  uv run src/main.py --config "$CONFIG_PATH" --data_dir "$NODE_DATA"
-else
-  uv run src/train.py --config "$CONFIG_PATH" --data_path "$NODE_DATA/train.bin"
-fi
+uv run src/main.py --config "$CONFIG_PATH" --data_config "$DATA_CONFIG" --data_dir "$NODE_DATA"
 
 # 5. Cleanup
 # Removing the data from the local node to keep the cluster healthy

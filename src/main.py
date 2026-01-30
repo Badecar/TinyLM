@@ -1,4 +1,4 @@
-from train_refined import main
+from train import main
 
 
 if __name__ == "__main__":

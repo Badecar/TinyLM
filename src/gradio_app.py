@@ -10,6 +10,7 @@ SRC_DIR = "/root/src"
 CHECKPOINT_DIR = "/root/checkpoints"
 
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+os.environ.setdefault("GRADIO_MCP_SERVER", "True")
 
 image = (
     modal.Image.debian_slim()

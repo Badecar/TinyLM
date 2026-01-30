@@ -66,7 +66,7 @@ uv sync
 # 4. Run the Training Burn
 # We pass the LOCAL_DATA path to your script
 echo "Starting training at: $(date)"
-uv run src/main.py --data_dir "$NODE_DATA" --batch_size 64
+uv run src/main.py --data_dir "$NODE_DATA"
 
 # 5. Cleanup
 # Removing the data from the local node to keep the cluster healthy

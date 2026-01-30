@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import re
 
 import numpy as np
 import torch
@@ -40,6 +41,42 @@ class CrossEntropyLoss(nn.Module):
         logits = logits.view(B * T, V)
         targets = targets.view(B * T)
         return self.loss_fn(logits, targets)
+
+
+def _is_version_dir(path: str) -> bool:
+    return re.fullmatch(r"v\d+", os.path.basename(path)) is not None
+
+
+def _get_latest_version_dir(base_dir: str) -> str | None:
+    if not os.path.isdir(base_dir):
+        return None
+    candidates = []
+    for name in os.listdir(base_dir):
+        match = re.fullmatch(r"v(\d+)", name)
+        if match:
+            candidates.append((int(match.group(1)), os.path.join(base_dir, name)))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _resolve_checkpoint_dir(checkpoint_dir: str, resume_latest: bool, resume_from: str | None) -> str:
+    checkpoint_dir = os.path.expanduser(checkpoint_dir)
+    if resume_from:
+        return os.path.dirname(os.path.expanduser(resume_from))
+    if resume_latest:
+        if _is_version_dir(checkpoint_dir):
+            return checkpoint_dir
+        latest_dir = _get_latest_version_dir(checkpoint_dir)
+        return latest_dir or checkpoint_dir
+    if _is_version_dir(checkpoint_dir):
+        return checkpoint_dir
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    latest_dir = _get_latest_version_dir(checkpoint_dir)
+    next_version = 1
+    if latest_dir is not None:
+        next_version = int(os.path.basename(latest_dir)[1:]) + 1
+    return os.path.join(checkpoint_dir, f"v{next_version}")
 
 
 class Trainer:
@@ -396,6 +433,13 @@ def main():
     parser.add_argument("--data_seed", type=int, default=1337)
     args = parser.parse_args()
 
+    checkpoint_dir = _resolve_checkpoint_dir(
+        args.checkpoint_dir,
+        resume_latest=args.resume_latest,
+        resume_from=args.resume_from,
+    )
+    print(f"Using checkpoint directory: {checkpoint_dir}")
+
     model = TinyLM(
         vocab_size=50257,
         emb_dim=1024,
@@ -419,7 +463,7 @@ def main():
         weight_decay=0.1,
         warmup_steps=3000,
         max_steps=args.max_steps,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
         verbose=True,
         generation_interval=1000,
         resume_latest=args.resume_latest,

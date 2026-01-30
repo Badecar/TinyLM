@@ -36,10 +36,13 @@ uv sync
 
 # 4. Run the Training Burn (Resume)
 echo "Starting resume training at: $(date)"
+CHECKPOINT_ROOT="$HOME/checkpoints"
+CHECKPOINT_VERSION="v1"
 uv run src/main.py \
   --data_dir "$NODE_DATA" \
   --batch_size 64 \
   --resume_latest \
+  --checkpoint_dir "$CHECKPOINT_ROOT/$CHECKPOINT_VERSION" \
   --max_steps 160000
 
 # 5. Cleanup

@@ -281,6 +281,7 @@ class Trainer:
 
         prompts = [
             "The cold war is generally known for",
+            "Once upon a time",
             "def fibonacci(n):",
         ]
 

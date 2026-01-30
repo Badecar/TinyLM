@@ -5,4 +5,4 @@ wandb_project: "TinyLM"
 wandb_entity: "badecar-danmarks-tekniske-universitet-dtu"
 # Optionally inline the API key (or leave blank and use env vars).
 wandb_api_key: "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"
-best_wandb_interval: 2500
+best_wandb_interval: 1000

@@ -6,10 +6,10 @@
 context_size: 1024
 batch_size: 64
 learning_rate: 0.0006
-max_steps: 80000
+max_steps: 21500
 warmup_steps: 3000
 grad_accum_steps: 2  # micro-batch accumulation e.g. (32 x 4 = 128 effective)
-generation_interval: 100
+generation_interval: 500
 # --- Model architecture ---
 emb_dim: 1024
 n_layers: 16
@@ -31,7 +31,7 @@ use_activation_checkpointing: true
 # n_layers: 12
 # n_heads: 12
 # att_dim: 64
-# attention_impl: "sdpa" # "sdpa" (refined) or "manual" (old)
+# attention_impl: "manual" # "sdpa" (refined) or "manual" (old)
 # use_activation_checkpointing: false
 
 checkpoint_dir: "~/checkpoints"

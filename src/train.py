@@ -119,6 +119,7 @@ class Trainer:
         resume_latest: bool = False,
         data_seed: int = 1337,
         grad_accum_steps: int = 1,
+        config_files: dict[str, str] | None = None,
     ):
         self.model = model
         self.data_loader = data_loader
@@ -197,6 +198,19 @@ class Trainer:
                 settings=wandb.Settings(console="wrap"),
             )
             wandb.watch(self.model, log="gradients", log_freq=self.log_interval)
+            
+            # Log configuration files as artifacts
+            if config_files:
+                config_artifact = wandb.Artifact(
+                    name="config-files",
+                    type="config",
+                    description="Configuration YAML files for this training run"
+                )
+                for name, path in config_files.items():
+                    if path and os.path.exists(path):
+                        config_artifact.add_file(path, name=f"{name}.yaml")
+                        print(f"Logging {name}.yaml to W&B")
+                self.wandb_run.log_artifact(config_artifact)
         else:
             self.wandb_run = None
 
@@ -617,6 +631,15 @@ def main():
             pin_memory=True,
         )
 
+    # Collect config file paths for W&B logging
+    config_files = {}
+    if config_path:
+        config_files["train"] = config_path
+    if resolved_data_path:
+        config_files["data"] = resolved_data_path
+    if wandb_path:
+        config_files["wandb"] = wandb_path
+    
     trainer = Trainer(
         model=model,
         data_loader=data_loader,
@@ -635,6 +658,7 @@ def main():
         wandb_project=settings["wandb_project"],
         wandb_entity=settings["wandb_entity"],
         best_wandb_interval=settings["best_wandb_interval"],
+        config_files=config_files,
     )
 
     trainer.train()

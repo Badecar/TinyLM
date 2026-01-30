@@ -4,11 +4,11 @@
 
 # --- Training loop ---
 context_size: 1024
-batch_size: 128
+batch_size: 64
 learning_rate: 0.0006
 max_steps: 80000
 warmup_steps: 3000
-grad_accum_steps: 1  # micro-batch accumulation e.g. (32 x 4 = 128 effective)
+grad_accum_steps: 2  # micro-batch accumulation e.g. (32 x 4 = 128 effective)
 generation_interval: 100
 # --- Model architecture ---
 emb_dim: 1024

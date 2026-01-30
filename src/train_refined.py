@@ -383,9 +383,12 @@ def main():
     LEARNING_RATE = 6e-4
     MAX_STEPS = 80000
     USE_ACTIVATION_CHECKPOINTING = True
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    repo_slm_data = os.path.join(repo_root, "slm_data")
+    default_data_dir = repo_slm_data if os.path.isdir(repo_slm_data) else "~/slm_data"
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="~/slm_data")
+    parser.add_argument("--data_dir", type=str, default=default_data_dir)
     parser.add_argument("--context_size", type=int, default=CONTEXT_SIZE)
     parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     parser.add_argument("--learning_rate", type=float, default=LEARNING_RATE)

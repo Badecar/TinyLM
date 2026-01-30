@@ -404,7 +404,7 @@ def main():
         max_steps=args.max_steps,
         checkpoint_dir=args.checkpoint_dir,
         verbose=True,
-        generation_interval=500,
+        generation_interval=100,
         resume_latest=args.resume_latest,
         resume_from=args.resume_from,
     )

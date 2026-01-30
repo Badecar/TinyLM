@@ -38,10 +38,19 @@ class EliteDataLoader:
                     self.active_buffers.append(self.buffers[filename])
                     self.weights.append(weight)
         
+        if not self.active_buffers:
+            available_bins = ", ".join(sorted(self.files)) if self.files else "none"
+            raise ValueError(
+                "No matching .bin files found for the elite mixture. "
+                f"Data dir: {self.data_dir}. "
+                f"Expected filenames containing one of: {list(weights.keys())}. "
+                f"Found .bin files: {available_bins}."
+            )
+
         # Normalize weights
         self.weights = np.array(self.weights) / sum(self.weights)
         self.indices = [0] * len(self.active_buffers)
-        
+
         print(f"Elite Mixer initialized with {len(self.active_buffers)} sources.")
 
     def get_batch(self):

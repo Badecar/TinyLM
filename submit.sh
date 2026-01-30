@@ -29,10 +29,34 @@ module load cuda/12.1
 # This ensures the GPU never waits for the network.
 NODE_DATA="/tmp/${USER}_tinylm_data"
 mkdir -p "$NODE_DATA"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+DATA_SRC=""
+for candidate in \
+  "${REPO_ROOT}/slm_data" \
+  "${PWD}/slm_data" \
+  "${PWD}/TinyLM/slm_data" \
+  "${HOME}/TinyLM/slm_data" \
+  "${HOME}/slm_data"; do
+  if [[ -d "$candidate" ]]; then
+    DATA_SRC="$candidate"
+    break
+  fi
+done
+if [[ -z "$DATA_SRC" ]]; then
+  echo "ERROR: Could not find slm_data directory." >&2
+  echo "Tried: \$REPO_ROOT/slm_data, \$PWD/slm_data, \$PWD/TinyLM/slm_data, \$HOME/TinyLM/slm_data, \$HOME/slm_data" >&2
+  exit 1
+fi
 
 echo "Staging data: Home -> Local SSD ($NODE_DATA)..."
 # Copy refined bins to local SSD
-cp ~/slm_data/*.bin "$NODE_DATA/"
+shopt -s nullglob
+bin_files=("${DATA_SRC}"/*.bin)
+if (( ${#bin_files[@]} == 0 )); then
+  echo "ERROR: No .bin files found in ${DATA_SRC}." >&2
+  exit 1
+fi
+cp "${bin_files[@]}" "$NODE_DATA/"
 
 # 3. UV Virtual Environment Logic
 # We sync before running. UV is fast enough to do this every time.

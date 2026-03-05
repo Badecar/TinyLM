@@ -437,7 +437,8 @@ class Trainer:
         torch.save(payload, path)
 
     def load_checkpoint(self, path: str):
-        checkpoint = torch.load(path, map_location=self.device)
+        # PyTorch 2.6 defaults weights_only=True; we need full optimizer/scheduler state.
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.lr_scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
